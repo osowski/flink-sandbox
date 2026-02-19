@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install confluent-kafka library
+RUN pip install --no-cache-dir confluent-kafka==2.3.0
+
+# Copy the producer script
+COPY producer.py .
+
+# Run the producer
+CMD ["python", "-u", "producer.py"]

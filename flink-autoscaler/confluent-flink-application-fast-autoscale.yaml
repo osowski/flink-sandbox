@@ -1,0 +1,106 @@
+apiVersion: platform.confluent.io/v1beta1
+kind: FlinkApplication
+metadata:
+  name: flink-kafka-autoscale-demo
+  namespace: flink
+  labels:
+    app: flink-kafka-demo
+    component: streaming
+    platform: confluent
+spec:
+  # Reference to FlinkEnvironment - REQUIRED
+  flinkEnvironment: default-flink-env
+
+  # Confluent Metadata Framework REST class reference
+  cmfRestClassRef:
+    name: cmf-rest-class
+    namespace: flink
+
+  # Flink image matching the original deployment
+  image: flink-kafka-demo:2.1.1-202602191145
+  imagePullPolicy: Never
+
+  # Flink version
+  flinkVersion: v2_1
+
+  # Deployment mode (native or standalone)
+  #mode: native
+
+  # Service account for RBAC
+  serviceAccount: flink
+
+  # Flink configuration - OPTIMIZED FOR FAST AUTOSCALING DEMO
+  flinkConfiguration:
+    # Task slots per TaskManager
+    taskmanager.numberOfTaskSlots: "1"
+
+    # TaskManager memory configuration
+    #taskmanager.memory.process.size: "1024m"
+    #taskmanager.memory.managed.fraction: "0.4"
+
+    # AGGRESSIVE Autoscaler configuration - Optimized for demo visibility
+    kubernetes.operator.job.autoscaler.enabled: "true"
+    kubernetes.operator.job.autoscaler.target.utilization: "0.08"           # 8% - very aggressive
+    kubernetes.operator.job.autoscaler.metrics.window: "2m"                 # Must be > reconcile interval (60s default)
+    kubernetes.operator.job.autoscaler.stabilization.interval: "30s"        # Quick decisions after metrics collected
+    kubernetes.operator.job.autoscaler.scale-down.grace-period: "2m"        # Wait time before scaling down after detecting underutilization
+    kubernetes.operator.job.autoscaler.scale-down.interval: "5m"            # Cooldown after any scaling before allowing scale-down
+    #kubernetes.operator.job.autoscaler.scale-up.max-parallelism: "4"
+    kubernetes.operator.job.autoscaler.scaling.effectiveness.detection.enabled: "true"
+    pipeline.max-parallelism: "4" ## Previously 16 per Claude recommendation; setting to 4 to match Jeremy's setting
+
+    # Faster checkpointing for quicker scaling
+    #execution.checkpointing.interval: "5s"
+    #execution.checkpointing.mode: "EXACTLY_ONCE"
+    #execution.checkpointing.min-pause: "2s"
+
+    ## State backend configuration
+    #state.backend: "rocksdb"
+    #state.checkpoints.dir: "file:///tmp/flink-checkpoints"
+    #state.savepoints.dir: "file:///tmp/flink-savepoints"
+
+    # Restart strategy - Flink v2 format
+    restart-strategy.type: "fixed-delay"
+    restart-strategy.fixed-delay.attempts: "3"
+    restart-strategy.fixed-delay.delay: "5s"
+
+    # Metrics - Prometheus
+    metrics.reporter.prom.factory.class: "org.apache.flink.metrics.prometheus.PrometheusReporterFactory"
+    metrics.reporter.prom.port: "9249-9250"
+
+  # JobManager configuration
+  jobManager:
+    replicas: 1
+    resource:
+      memory: "1024m"
+      cpu: "500m"
+
+  # TaskManager configuration - REDUCED CPU for faster backpressure
+  taskManager:
+    #replicas: 1  # Initial replicas - autoscaler will scale up quickly
+    resource:
+      memory: "1024m"     # Safe memory allocation (minimum ~700m needed for Flink internals)
+      cpu: "250m"         # LOW CPU is the key constraint - creates backpressure
+
+  # Job configuration
+  job:
+    jarURI: local:///opt/flink/usrlib/kafka-flink-job.jar
+    parallelism: 1
+    state: running
+    upgradeMode: stateless
+    allowNonRestoredState: true
+
+  # Pod template for environment variables and customization
+  podTemplate:
+    spec:
+      containers:
+        - name: flink-main-container
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka.kafka.svc.cluster.local:9092"
+            - name: KAFKA_TOPIC
+              value: "autoscale-demo"
+            - name: KAFKA_OUTPUT_TOPIC
+              value: "autoscale-demo-out"
+            - name: KAFKA_CONSUMER_GROUP
+              value: "flink-consumer-group-beta"

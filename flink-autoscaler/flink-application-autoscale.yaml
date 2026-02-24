@@ -17,8 +17,8 @@ spec:
     namespace: flink
 
   # Flink image matching the original deployment
-  image: flink-kafka-demo:2.1.1-202602191145
-  imagePullPolicy: Never
+  image: quay.io/osowski/flink-kafka-demo:2.1.1-202602191145
+  imagePullPolicy: IfNotPresent
 
   # Flink version
   flinkVersion: v2_1
@@ -39,15 +39,15 @@ spec:
     #taskmanager.memory.managed.fraction: "0.4"
 
     # AGGRESSIVE Autoscaler configuration - Optimized for demo visibility
-    kubernetes.operator.job.autoscaler.enabled: "true"
-    kubernetes.operator.job.autoscaler.target.utilization: "0.08"           # 8% - very aggressive
-    kubernetes.operator.job.autoscaler.metrics.window: "2m"                 # Must be > reconcile interval (60s default)
-    kubernetes.operator.job.autoscaler.stabilization.interval: "30s"        # Quick decisions after metrics collected
-    kubernetes.operator.job.autoscaler.scale-down.grace-period: "2m"        # Wait time before scaling down after detecting underutilization
-    kubernetes.operator.job.autoscaler.scale-down.interval: "5m"            # Cooldown after any scaling before allowing scale-down
-    #kubernetes.operator.job.autoscaler.scale-up.max-parallelism: "4"
-    kubernetes.operator.job.autoscaler.scaling.effectiveness.detection.enabled: "true"
-    pipeline.max-parallelism: "4" ## Previously 16 per Claude recommendation; setting to 4 to match Jeremy's setting
+    job.autoscaler.enabled: "true"
+    job.autoscaler.utilization.target: "0.3"           # 8% - very aggressive
+    job.autoscaler.metrics.window: "2m"                 # Must be > reconcile interval (60s default)
+    job.autoscaler.stabilization.interval: "30s"        # Quick decisions after metrics collected
+    #job.autoscaler.scale-down.grace-period: "2m"        # Wait time before scaling down after detecting underutilization
+    job.autoscaler.scale-down.interval: "5m"            # Cooldown after any scaling before allowing scale-down
+    job.autoscaler.vertex.max-parallelism: "16"
+    job.autoscaler.scaling.effectiveness.detection.enabled: "true"
+    #pipeline.max-parallelism: "32" ## Previously 16 per Claude recommendation; setting to 4 to match Jeremy's setting
 
     # Faster checkpointing for quicker scaling
     #execution.checkpointing.interval: "5s"
@@ -73,14 +73,14 @@ spec:
     replicas: 1
     resource:
       memory: "1024m"
-      cpu: "500m"
+      cpu: "1500m"
 
   # TaskManager configuration - REDUCED CPU for faster backpressure
   taskManager:
     #replicas: 1  # Initial replicas - autoscaler will scale up quickly
     resource:
       memory: "1024m"     # Safe memory allocation (minimum ~700m needed for Flink internals)
-      cpu: "250m"         # LOW CPU is the key constraint - creates backpressure
+      cpu: "500m"         # LOW CPU is the key constraint - creates backpressure
 
   # Job configuration
   job:

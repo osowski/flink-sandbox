@@ -40,13 +40,14 @@ spec:
 
     # AGGRESSIVE Autoscaler configuration - Optimized for demo visibility
     job.autoscaler.enabled: "true"
-    job.autoscaler.utilization.target: "0.3"           # 8% - very aggressive
-    job.autoscaler.metrics.window: "2m"                 # Must be > reconcile interval (60s default)
+    job.autoscaler.utilization.target: "0.3"            # 8% - very aggressive
+    job.autoscaler.utilization.min: "0.1"               # Force scale-down below 10%
+    job.autoscaler.utilization.max: "0.5"               # Force scale-up above 50%
+    job.autoscaler.metrics.window: "3m"                 # Must be > reconcile interval (60s default)
     job.autoscaler.stabilization.interval: "30s"        # Quick decisions after metrics collected
-    #job.autoscaler.scale-down.grace-period: "2m"        # Wait time before scaling down after detecting underutilization
-    job.autoscaler.scale-down.interval: "5m"            # Cooldown after any scaling before allowing scale-down
+    job.autoscaler.scale-down.interval: "2m"            # Cooldown after any scaling before allowing scale-down
     job.autoscaler.vertex.max-parallelism: "16"
-    job.autoscaler.scaling.effectiveness.detection.enabled: "true"
+    job.autoscaler.scaling.effectiveness.detection.enabled: "false" # RECOMMENDED DISABLED FOR DEMOS
     #pipeline.max-parallelism: "32" ## Previously 16 per Claude recommendation; setting to 4 to match Jeremy's setting
 
     # Faster checkpointing for quicker scaling

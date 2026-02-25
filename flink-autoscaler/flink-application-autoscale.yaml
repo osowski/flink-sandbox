@@ -40,13 +40,13 @@ spec:
 
     # AGGRESSIVE Autoscaler configuration - Optimized for demo visibility
     job.autoscaler.enabled: "true"
-    job.autoscaler.utilization.target: "0.3"            # 8% - very aggressive
+    job.autoscaler.utilization.target: "0.3"            # 30% - aggressive for demo purposes
     job.autoscaler.utilization.min: "0.1"               # Force scale-down below 10%
     job.autoscaler.utilization.max: "0.5"               # Force scale-up above 50%
-    job.autoscaler.metrics.window: "3m"                 # Must be > reconcile interval (60s default)
-    job.autoscaler.stabilization.interval: "30s"        # Quick decisions after metrics collected
-    job.autoscaler.scale-down.interval: "2m"            # Cooldown after any scaling before allowing scale-down
-    job.autoscaler.vertex.max-parallelism: "16"
+    job.autoscaler.metrics.window: "5m"                 # Must be > reconcile interval (60s default)
+    job.autoscaler.stabilization.interval: "1m"         # Quick decisions after metrics collected
+    job.autoscaler.scale-down.interval: "10m"           # Cooldown after any scaling before allowing scale-down
+    job.autoscaler.vertex.max-parallelism: "8"
     job.autoscaler.scaling.effectiveness.detection.enabled: "false" # RECOMMENDED DISABLED FOR DEMOS
     #pipeline.max-parallelism: "32" ## Previously 16 per Claude recommendation; setting to 4 to match Jeremy's setting
 
@@ -105,3 +105,11 @@ spec:
               value: "autoscale-demo-out"
             - name: KAFKA_CONSUMER_GROUP
               value: "flink-consumer-group-beta"
+          startupProbe:
+            httpGet:
+              path: /config
+              port: 8081
+            initialDelaySeconds: 30      # Wait 30s before first check
+            periodSeconds: 5              # Check every 5s (instead of 1s default)
+            failureThreshold: 60          # Allow 60 failures = 5 minutes total
+            successThreshold: 1

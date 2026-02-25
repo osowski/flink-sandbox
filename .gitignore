@@ -56,3 +56,7 @@ nbbuild/
 dist/
 nbdist/
 .nb-gradle/
+
+# Agent configuration
+.claude/
+*/.github/

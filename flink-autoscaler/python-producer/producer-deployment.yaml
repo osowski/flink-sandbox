@@ -17,9 +17,8 @@ spec:
     spec:
       containers:
       - name: producer
-        image: kafka-producer:latest
-        imagePullPolicy: Never  # For local kind cluster
-        #imagePullPolicy: IfNotPresent  # For any non-kind cluster
+        image: quay.io/osowski/kafka-producer:latest
+        imagePullPolicy: IfNotPresent
         env:
         - name: PYTHONUNBUFFERED
           value: "1"

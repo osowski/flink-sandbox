@@ -74,14 +74,14 @@ spec:
     replicas: 1
     resource:
       memory: "1024m"
-      cpu: "1500m"
+      cpu: "1000m"
 
   # TaskManager configuration - REDUCED CPU for faster backpressure
   taskManager:
     #replicas: 1  # Initial replicas - autoscaler will scale up quickly
     resource:
       memory: "1024m"     # Safe memory allocation (minimum ~700m needed for Flink internals)
-      cpu: "500m"         # LOW CPU is the key constraint - creates backpressure
+      cpu: "1000m"         # LOW CPU is the key constraint - creates backpressure
 
   # Job configuration
   job:
@@ -105,11 +105,3 @@ spec:
               value: "autoscale-demo-out"
             - name: KAFKA_CONSUMER_GROUP
               value: "flink-consumer-group-beta"
-          startupProbe:
-            httpGet:
-              path: /config
-              port: 8081
-            initialDelaySeconds: 30      # Wait 30s before first check
-            periodSeconds: 5              # Check every 5s (instead of 1s default)
-            failureThreshold: 60          # Allow 60 failures = 5 minutes total
-            successThreshold: 1

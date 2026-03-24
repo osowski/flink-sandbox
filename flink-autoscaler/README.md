@@ -247,6 +247,44 @@ spec:
 - This enables OAuth, SASL, SSL, and other Kafka client configurations
 - Environment variables in JAAS config (e.g., `${env:KAFKA_OAUTH_CLIENT_ID}`) are resolved at runtime
 
+#### Offset Management
+
+The Flink application respects the `auto.offset.reset` configuration from FlinkApplication, allowing you to control whether to process all messages or only new ones.
+
+**Configuration:**
+```yaml
+flinkConfiguration:
+  kafka.consumer.auto.offset.reset: earliest  # or latest
+```
+
+**Available options:**
+- **`earliest`** (recommended for testing): Process all messages from the beginning of the topic
+  - Use when you want to replay historical data
+  - Ensures all messages are processed after job restart
+  - Enables message correlation between input and output topics
+
+- **`latest`** (production default): Process only new messages that arrive after the job starts
+  - Skips all existing messages in the topic
+  - Lower latency on job startup
+  - Suitable for real-time processing where historical data isn't needed
+
+**Example scenario:**
+```bash
+# Producer writes 1000 messages to topic before Flink job starts
+kubectl apply -f producer-deployment.yaml
+
+# Wait for messages to be produced...
+
+# Deploy Flink with earliest offset
+kubectl apply -f flink-application-autoscale.yaml
+# Result: Flink processes all 1000 messages + any new ones
+
+# vs. Deploy Flink with latest offset
+# Result: Flink skips the 1000 existing messages, processes only new messages
+```
+
+**Note:** The application no longer hardcodes offset behavior - it always respects your FlinkApplication configuration.
+
 #### Method 2: Environment Variables (Legacy)
 
 Set via `podTemplate` in the FlinkApplication spec. This method is maintained for backward compatibility but doesn't support Kafka security configuration.

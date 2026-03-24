@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Properties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -69,26 +70,48 @@ public class KafkaFlinkJob {
     }
 
     public static void main(String[] args) throws Exception {
-        // Get configuration from environment variables
-        String kafkaBootstrapServers = System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "kafka.kafka.svc.cluster.local:9092");
-        String kafkaTopic = System.getenv().getOrDefault("KAFKA_TOPIC", "autoscale-demo");
-        String consumerGroup = System.getenv().getOrDefault("KAFKA_CONSUMER_GROUP", "flink-consumer");
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Get Flink configuration to read kafka.* properties
+        org.apache.flink.configuration.Configuration flinkConfig =
+            (org.apache.flink.configuration.Configuration) env.getConfiguration();
+
+        // Extract all kafka.* properties from Flink configuration
+        // These properties are set in FlinkApplication spec.flinkConfiguration
+        Properties kafkaProps = new Properties();
+        for (String key : flinkConfig.keySet()) {
+            if (key.startsWith("kafka.")) {
+                // Remove "kafka." prefix to get actual Kafka client property name
+                String kafkaKey = key.substring(6);
+                kafkaProps.setProperty(kafkaKey, flinkConfig.getString(key, ""));
+            }
+        }
+
+        // Get configuration from Flink config with environment variable fallback
+        // This maintains backward compatibility with existing deployments
+        String kafkaBootstrapServers = flinkConfig.getString("kafka.bootstrap.servers",
+                System.getenv().getOrDefault("KAFKA_BOOTSTRAP_SERVERS", "kafka.kafka.svc.cluster.local:9092"));
+        String kafkaTopic = flinkConfig.getString("kafka.input.topic",
+                System.getenv().getOrDefault("KAFKA_TOPIC", "autoscale-demo"));
+        String consumerGroup = flinkConfig.getString("kafka.consumer.group.id",
+                System.getenv().getOrDefault("KAFKA_CONSUMER_GROUP", "flink-consumer"));
 
         System.out.println("Starting Kafka Flink Job");
         System.out.println("Kafka Bootstrap Servers: " + kafkaBootstrapServers);
         System.out.println("Kafka Topic: " + kafkaTopic);
         System.out.println("Consumer Group: " + consumerGroup);
-
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        System.out.println("Kafka Properties: " + kafkaProps.size() + " properties loaded from Flink configuration");
 
         // Disable operator chaining for better visibility in Flink UI
         env.disableOperatorChaining();
 
         // Configure Kafka source with key-value deserialization
+        // Now includes all kafka.* properties from Flink configuration for OAuth/security support
         KafkaSource<Tuple2<String, String>> source = KafkaSource.<Tuple2<String, String>>builder()
                 .setBootstrapServers(kafkaBootstrapServers)
                 .setTopics(kafkaTopic)
                 .setGroupId(consumerGroup)
+                .setProperties(kafkaProps)  // Pass all Kafka properties including security config
                 .setStartingOffsets(OffsetsInitializer.latest())
                 .setDeserializer(new KeyValueDeserializer())
                 .build();
@@ -156,10 +179,12 @@ public class KafkaFlinkJob {
         .disableChaining();
 
         // Configure Kafka sink to write processed messages back to Kafka with keys
-        String outputTopic = System.getenv().getOrDefault("KAFKA_OUTPUT_TOPIC", "autoscale-demo-out");
+        String outputTopic = flinkConfig.getString("kafka.output.topic",
+                System.getenv().getOrDefault("KAFKA_OUTPUT_TOPIC", "autoscale-demo-out"));
 
         KafkaSink<Tuple2<String, String>> sink = KafkaSink.<Tuple2<String, String>>builder()
                 .setBootstrapServers(kafkaBootstrapServers)
+                .setKafkaProducerConfig(kafkaProps)  // Pass all Kafka properties including security config
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                         .setTopic(outputTopic)
                         .setKeySerializationSchema(new org.apache.flink.api.common.serialization.SerializationSchema<Tuple2<String, String>>() {

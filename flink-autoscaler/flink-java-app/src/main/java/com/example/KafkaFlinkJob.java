@@ -107,12 +107,13 @@ public class KafkaFlinkJob {
 
         // Configure Kafka source with key-value deserialization
         // Now includes all kafka.* properties from Flink configuration for OAuth/security support
+        // Note: Starting offset is controlled by kafka.consumer.auto.offset.reset property
+        // from FlinkApplication configuration (typically "earliest" or "latest")
         KafkaSource<Tuple2<String, String>> source = KafkaSource.<Tuple2<String, String>>builder()
                 .setBootstrapServers(kafkaBootstrapServers)
                 .setTopics(kafkaTopic)
                 .setGroupId(consumerGroup)
                 .setProperties(kafkaProps)  // Pass all Kafka properties including security config
-                .setStartingOffsets(OffsetsInitializer.latest())
                 .setDeserializer(new KeyValueDeserializer())
                 .build();
 

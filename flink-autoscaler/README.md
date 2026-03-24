@@ -206,16 +206,68 @@ The demo uses aggressive autoscaling settings for quick demonstration:
 
 These settings are optimized for demo visibility. For production, use more conservative values.
 
-## Environment Variables
+## Configuration
 
-### Flink Application
+### Flink Application Configuration
 
-Set via `podTemplate` in the FlinkApplication spec:
+The Flink application supports configuration via two methods:
 
-- `KAFKA_BOOTSTRAP_SERVERS`: `kafka.kafka.svc.cluster.local:9092`
-- `KAFKA_TOPIC`: `autoscale-demo`
-- `KAFKA_OUTPUT_TOPIC`: `autoscale-demo-out`
-- `KAFKA_CONSUMER_GROUP`: `flink-consumer-group-beta`
+#### Method 1: Flink Configuration Properties (Recommended)
+
+Set Kafka properties in the FlinkApplication spec under `flinkConfiguration`. This is the recommended approach for OAuth/SASL authentication and other advanced Kafka configurations.
+
+```yaml
+apiVersion: platform.confluent.io/v1beta1
+kind: FlinkApplication
+metadata:
+  name: flink-kafka-autoscale-demo
+spec:
+  flinkConfiguration:
+    # Kafka connection
+    kafka.bootstrap.servers: kafka.kafka.svc.cluster.local:9071
+    kafka.input.topic: autoscale-demo
+    kafka.output.topic: autoscale-demo-out
+    kafka.consumer.group.id: flink-consumer-group-beta
+
+    # Kafka security (OAuth example)
+    kafka.security.protocol: SASL_PLAINTEXT
+    kafka.sasl.mechanism: OAUTHBEARER
+    kafka.sasl.oauthbearer.token.endpoint.url: http://keycloak.keycloak.svc.cluster.local:8080/realms/confluent/protocol/openid-connect/token
+    kafka.sasl.login.callback.handler.class: org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler
+    kafka.sasl.jaas.config: |
+      org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required
+      clientId="${env:KAFKA_OAUTH_CLIENT_ID}"
+      clientSecret="${env:KAFKA_OAUTH_CLIENT_SECRET}"
+      tokenEndpointUri="http://keycloak.keycloak.svc.cluster.local:8080/realms/confluent/protocol/openid-connect/token";
+```
+
+**How it works:**
+- All properties prefixed with `kafka.` are automatically extracted by the application
+- The `kafka.` prefix is removed and properties are passed to Kafka connectors
+- This enables OAuth, SASL, SSL, and other Kafka client configurations
+- Environment variables in JAAS config (e.g., `${env:KAFKA_OAUTH_CLIENT_ID}`) are resolved at runtime
+
+#### Method 2: Environment Variables (Legacy)
+
+Set via `podTemplate` in the FlinkApplication spec. This method is maintained for backward compatibility but doesn't support Kafka security configuration.
+
+```yaml
+podTemplate:
+  spec:
+    containers:
+      - name: flink-main-container
+        env:
+          - name: KAFKA_BOOTSTRAP_SERVERS
+            value: kafka.kafka.svc.cluster.local:9092
+          - name: KAFKA_TOPIC
+            value: autoscale-demo
+          - name: KAFKA_OUTPUT_TOPIC
+            value: autoscale-demo-out
+          - name: KAFKA_CONSUMER_GROUP
+            value: flink-consumer-group-beta
+```
+
+**Note:** When both Flink configuration properties and environment variables are set, Flink configuration takes precedence.
 
 ### Python Producer
 

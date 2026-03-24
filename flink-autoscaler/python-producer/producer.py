@@ -170,9 +170,11 @@ def main():
                 for i in range(rate):
                     # Generate message based on data type
                     if data_type == 'shapes':
-                        value = generate_shapes_data(total_messages_sent)
+                        # value = generate_shapes_data(total_messages_sent)
+                        value = generate_random_data()
                     elif data_type == 'colors':
-                        value = generate_colors_data(total_messages_sent)
+                        # value = generate_colors_data(total_messages_sent)
+                        value = generate_random_data()
                     else:
                         value = generate_random_data()
 

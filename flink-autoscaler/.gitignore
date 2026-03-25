@@ -1,0 +1,20 @@
+# Maven build outputs
+flink-java-app/target/
+flink-java-app/dependency-reduced-pom.xml
+
+# Python virtual environments
+python-producer/.venv/
+python-producer/__pycache__/
+python-producer/*.pyc
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test and temporary files
+*.log
+.pytest_cache/

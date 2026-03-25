@@ -1,0 +1,56 @@
+{
+  "type": "record",
+  "name": "ProcessedSensorEvent",
+  "namespace": "com.confluent.examples.sensors",
+  "doc": "Sensor event enriched by Flink processing - used by both shapes and colors groups",
+  "fields": [
+    {
+      "name": "timestamp",
+      "type": "string",
+      "doc": "Event timestamp in ISO 8601 format"
+    },
+    {
+      "name": "type",
+      "type": "string",
+      "doc": "Data type (e.g., temperature, pressure, humidity)"
+    },
+    {
+      "name": "location",
+      "type": "string",
+      "doc": "Sensor location identifier"
+    },
+    {
+      "name": "value",
+      "type": "double",
+      "doc": "Numeric sensor reading value"
+    },
+    {
+      "name": "status",
+      "type": "string",
+      "doc": "Sensor status (normal, warning, critical)"
+    },
+    {
+      "name": "id",
+      "type": "string",
+      "doc": "Unique event identifier"
+    },
+    {
+      "name": "encoded",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Base64-encoded result of CPU-intensive transformations (added by Flink job)"
+    },
+    {
+      "name": "error",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Error message if processing failed (only present on error)"
+    },
+    {
+      "name": "original",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Original raw value if error occurred (only present on error)"
+    }
+  ]
+}

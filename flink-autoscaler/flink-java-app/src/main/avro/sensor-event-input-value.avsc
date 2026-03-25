@@ -1,0 +1,38 @@
+{
+  "type": "record",
+  "name": "SensorEvent",
+  "namespace": "com.confluent.examples.sensors",
+  "doc": "Sensor event data from Kafka producer - used by both shapes and colors groups",
+  "fields": [
+    {
+      "name": "timestamp",
+      "type": "string",
+      "doc": "Event timestamp in ISO 8601 format (e.g., 2024-03-23T10:30:45.123456)"
+    },
+    {
+      "name": "type",
+      "type": "string",
+      "doc": "Data type (e.g., temperature, pressure, humidity, speed, count)"
+    },
+    {
+      "name": "location",
+      "type": "string",
+      "doc": "Sensor location identifier (e.g., sensor-A, sensor-B, sensor-C)"
+    },
+    {
+      "name": "value",
+      "type": "double",
+      "doc": "Numeric sensor reading value (float rounded to 2 decimals)"
+    },
+    {
+      "name": "status",
+      "type": "string",
+      "doc": "Sensor status (normal, warning, or critical)"
+    },
+    {
+      "name": "id",
+      "type": "string",
+      "doc": "Unique event identifier (8-character alphanumeric)"
+    }
+  ]
+}

@@ -2,11 +2,25 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install confluent-kafka library
-RUN pip install --no-cache-dir confluent-kafka==2.3.0
+# Install system dependencies for confluent-kafka[avro]
+# librdkafka-dev is needed for building the confluent-kafka library
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gcc \
+        g++ \
+        librdkafka-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the producer script
-COPY producer.py .
+# Copy and install Python dependencies
+# Note: Build context is parent directory, so use full path
+COPY python-producer/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy Avro schemas directory from parent context
+COPY schemas/ schemas/
+
+# Copy the producer script from python-producer subdirectory
+COPY python-producer/producer.py .
 
 # Run the producer
 CMD ["python", "-u", "producer.py"]

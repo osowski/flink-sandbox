@@ -26,6 +26,10 @@ spec:
           value: "kafka:9092"
         - name: KAFKA_TOPIC
           value: "autoscale-demo"
+        # Schema Registry configuration
+        # Authentication is handled via SASL_INHERIT (reuses Kafka OAuth credentials)
+        - name: SCHEMA_REGISTRY_URL
+          value: "http://schemaregistry.kafka.svc.cluster.local:8081"
         resources:
           requests:
             memory: "128Mi"

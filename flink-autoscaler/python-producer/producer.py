@@ -1,11 +1,13 @@
 import time
 import math
-import json
 import logging
 import random
 import string
 import os
 from confluent_kafka import Producer
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroSerializer
+from confluent_kafka.serialization import StringSerializer, SerializationContext, MessageField
 from datetime import datetime
 
 # Configure logging
@@ -16,45 +18,79 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def load_avro_schema_string(schema_file):
+    """Load Avro schema from file as string."""
+    schema_path = os.path.join(os.path.dirname(__file__), 'schemas', schema_file)
+    try:
+        with open(schema_path, 'r') as f:
+            return f.read()
+    except FileNotFoundError:
+        logger.error(f"Schema file not found: {schema_path}")
+        logger.error("Make sure schemas/ directory exists with .avsc files")
+        raise
+    except Exception as e:
+        logger.error(f"Failed to load schema from {schema_path}: {e}")
+        raise
+
+
 def create_producer_config():
-    """Create Kafka producer configuration with optional OAuth support."""
+    """Create Kafka producer configuration with OAuth support."""
 
     # Get configuration from environment variables
     kafka_brokers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', os.getenv('KAFKA_BROKERS', 'kafka:9092'))
+    schema_registry_url = os.getenv('SCHEMA_REGISTRY_URL', 'http://schemaregistry.kafka.svc.cluster.local:8081')
 
-    # Base configuration
-    config = {
+    # Kafka producer configuration
+    kafka_config = {
         'bootstrap.servers': kafka_brokers,
-        'client.id': 'autoscale-producer',
+        'client.id': 'autoscale-producer-avro',
         'acks': 'all',
         'retries': 3,
         'linger.ms': 10
     }
 
-    # Add security configuration if specified
+    # Schema Registry configuration
+    schema_registry_conf = {
+        'url': schema_registry_url
+    }
+
+    # Add Kafka security configuration if specified
     security_protocol = os.getenv('KAFKA_SECURITY_PROTOCOL')
     if security_protocol:
-        config['security.protocol'] = security_protocol
+        kafka_config['security.protocol'] = security_protocol
         logger.info(f"Security protocol: {security_protocol}")
 
-        # OAuth configuration
+        # OAuth configuration for Kafka
         sasl_mechanism = os.getenv('KAFKA_SASL_MECHANISM')
         if sasl_mechanism == 'OAUTHBEARER':
-            config['sasl.mechanism'] = 'OAUTHBEARER'
-            config['sasl.oauthbearer.method'] = 'oidc'  # CRITICAL: Use OIDC for client credentials
-            config['sasl.oauthbearer.client.id'] = os.getenv('KAFKA_OAUTH_CLIENT_ID')
-            config['sasl.oauthbearer.client.secret'] = os.getenv('KAFKA_OAUTH_CLIENT_SECRET')
-            config['sasl.oauthbearer.token.endpoint.url'] = os.getenv('KAFKA_OAUTH_TOKEN_ENDPOINT_URL')
+            kafka_config['sasl.mechanism'] = 'OAUTHBEARER'
+            kafka_config['sasl.oauthbearer.method'] = 'oidc'
+            kafka_config['sasl.oauthbearer.client.id'] = os.getenv('KAFKA_OAUTH_CLIENT_ID')
+            kafka_config['sasl.oauthbearer.client.secret'] = os.getenv('KAFKA_OAUTH_CLIENT_SECRET')
+            kafka_config['sasl.oauthbearer.token.endpoint.url'] = os.getenv('KAFKA_OAUTH_TOKEN_ENDPOINT_URL')
 
             # Optional scope configuration
             oauth_scope = os.getenv('KAFKA_OAUTH_SCOPE')
             if oauth_scope:
-                config['sasl.oauthbearer.scope'] = oauth_scope
+                kafka_config['sasl.oauthbearer.scope'] = oauth_scope
 
-            logger.info(f"OAuth authentication enabled for client: {config['sasl.oauthbearer.client.id']}")
-            logger.info(f"Token endpoint: {config['sasl.oauthbearer.token.endpoint.url']}")
+            # Configure Schema Registry OAuth using bearer.auth.* properties
+            # For on-prem/CP Schema Registry, set logical.cluster and identity.pool.id to empty strings
+            schema_registry_conf['bearer.auth.credentials.source'] = 'OAUTHBEARER'
+            schema_registry_conf['bearer.auth.issuer.endpoint.url'] = os.getenv('KAFKA_OAUTH_TOKEN_ENDPOINT_URL')
+            schema_registry_conf['bearer.auth.client.id'] = os.getenv('KAFKA_OAUTH_CLIENT_ID')
+            schema_registry_conf['bearer.auth.client.secret'] = os.getenv('KAFKA_OAUTH_CLIENT_SECRET')
+            schema_registry_conf['bearer.auth.scope'] = os.getenv('KAFKA_OAUTH_SCOPE', '')  # Optional scope
+            schema_registry_conf['bearer.auth.logical.cluster'] = ''  # Empty for on-prem/CP
+            schema_registry_conf['bearer.auth.identity.pool.id'] = ''  # Empty for on-prem/CP
 
-    return config
+            logger.info(f"Schema Registry authentication: OAuth Bearer (client: {os.getenv('KAFKA_OAUTH_CLIENT_ID')})")
+            logger.info(f"Kafka OAuth enabled for client: {kafka_config['sasl.oauthbearer.client.id']}")
+            logger.info(f"Token endpoint: {kafka_config['sasl.oauthbearer.token.endpoint.url']}")
+
+    logger.info(f"Schema Registry URL: {schema_registry_url}")
+
+    return kafka_config, schema_registry_conf
 
 
 def delivery_report(err, msg):
@@ -63,18 +99,27 @@ def delivery_report(err, msg):
         if 'SASL' in str(err) or 'authentication' in str(err).lower():
             logger.error(f"Authentication error: {err}")
             logger.error("Check OAuth credentials and Keycloak connectivity")
-            logger.error("Verify KAFKA_OAUTH_CLIENT_ID and KAFKA_OAUTH_CLIENT_SECRET environment variables")
         elif 'authorization' in str(err).lower() or 'not authorized' in str(err).lower():
             logger.error(f"Authorization error: {err}")
             logger.error("Check RBAC permissions for the service account")
+        elif 'schema' in str(err).lower() or 'registry' in str(err).lower():
+            logger.error(f"Schema Registry error: {err}")
+            logger.error("Check Schema Registry connectivity and permissions")
         else:
             logger.error(f"Message delivery failed: {err}")
     else:
+        # Log first successful message with value inspection
+        if msg.offset() < 5:
+            value_bytes = msg.value()
+            if value_bytes:
+                logger.info(f'Message delivered to {msg.topic()} [{msg.partition()}] offset {msg.offset()}, value starts with: {list(value_bytes[:10])}')
+            else:
+                logger.info(f'Message delivered to {msg.topic()} [{msg.partition()}] offset {msg.offset()}, value is None')
         logger.debug(f'Message delivered to {msg.topic()} [{msg.partition()}] at offset {msg.offset()}')
 
 
 def generate_random_data():
-    """Generate randomized sample data (original autoscaler format)"""
+    """Generate randomized sample data matching SensorEvent Avro schema"""
     data_types = ['temperature', 'pressure', 'humidity', 'speed', 'count']
     locations = ['sensor-A', 'sensor-B', 'sensor-C', 'sensor-D', 'sensor-E']
 
@@ -88,33 +133,13 @@ def generate_random_data():
     }
 
 
-def generate_shapes_data(message_id):
-    """Generate shapes data for Flink demo"""
-    shapes = ["circle", "square", "triangle", "diamond", "trapezoid"]
-    colors = ["red", "blue", "green", "yellow", "orange"]
-
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "message_id": message_id,
-        "producer": "python-kafka-producer",
-        "shape": random.choice(shapes),
-        "size": random.randint(1, 100),
-        "color": random.choice(colors)
-    }
-
-
-def generate_colors_data(message_id):
-    """Generate colors data for Flink demo"""
-    colors = ["red", "green", "blue", "yellow", "orange"]
-
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "message_id": message_id,
-        "producer": "python-kafka-producer",
-        "color": random.choice(colors),
-        "intensity": random.randint(1, 100),
-        "hue": random.randint(0, 360)
-    }
+def sensor_event_to_dict(sensor_event, ctx):
+    """
+    Serialization function for AvroSerializer.
+    Converts dict to dict (pass-through since we're already generating dicts).
+    Required by AvroSerializer to properly encode with schema ID.
+    """
+    return sensor_event
 
 
 def generate_message_key():
@@ -127,7 +152,7 @@ def generate_message_key():
 def main():
     # Get configuration from environment
     topic = os.getenv('KAFKA_TOPIC', 'autoscale-demo')
-    data_type = os.getenv('DATA_TYPE', 'autoscale')  # 'autoscale', 'shapes', 'colors'
+    data_type = os.getenv('DATA_TYPE', 'autoscale')
 
     # Determine rate mode: fixed rate or sinusoidal
     message_rate_env = os.getenv('MESSAGE_RATE')
@@ -135,7 +160,7 @@ def main():
     fixed_rate = int(message_rate_env) if use_fixed_rate else 10
 
     logger.info("=" * 60)
-    logger.info("Python Kafka Producer Starting")
+    logger.info("Python Kafka Producer Starting (Avro Mode)")
     logger.info("=" * 60)
     logger.info(f"Topic: {topic}")
     logger.info(f"Data type: {data_type}")
@@ -145,15 +170,47 @@ def main():
         logger.info("Message rate: sinusoidal pattern (550±450 msg/sec)")
     logger.info("=" * 60)
 
+    # Load Avro schema
+    try:
+        value_schema_str = load_avro_schema_string('sensor-event-input-value.avsc')
+        logger.info("Loaded Avro schema: SensorEvent (namespace: com.confluent.examples.sensors)")
+    except Exception as e:
+        logger.error(f"Failed to load Avro schema: {e}")
+        logger.error("Cannot proceed without schema - exiting")
+        return
+
     # Create producer with OAuth-aware configuration
-    config = create_producer_config()
-    logger.info(f"Bootstrap servers: {config['bootstrap.servers']}")
+    kafka_config, schema_registry_conf = create_producer_config()
+    logger.info(f"Bootstrap servers: {kafka_config['bootstrap.servers']}")
+    logger.info(f"Schema Registry: {schema_registry_conf['url']}")
 
     try:
-        producer = Producer(config)
+        # Create Schema Registry client with built-in OAuth bearer authentication
+        schema_registry_client = SchemaRegistryClient(schema_registry_conf)
+        if 'bearer.auth.credentials.source' in schema_registry_conf:
+            logger.info("Schema Registry client created with OAuth bearer auth (bearer.auth.* config)")
+        else:
+            logger.info("Schema Registry client created (no OAuth)")
+
+        # Create Avro serializer for values with serialization function
+        avro_serializer = AvroSerializer(
+            schema_registry_client,
+            value_schema_str,
+            sensor_event_to_dict
+        )
+
+        # String serializer for keys
+        string_serializer = StringSerializer('utf_8')
+
+        # Create regular Producer (will manually serialize)
+        producer = Producer(kafka_config)
         logger.info("Producer created successfully")
+        logger.info("Schema will be auto-registered on first message (if not exists)")
     except Exception as e:
         logger.error(f"Failed to create producer: {e}")
+        logger.error("Check Schema Registry connectivity and OAuth configuration")
+        import traceback
+        traceback.print_exc()
         return
 
     # Message generation loop
@@ -163,72 +220,67 @@ def main():
     try:
         while True:
             if use_fixed_rate:
-                # Fixed rate mode (for shapes/colors demos)
+                # Fixed rate mode
                 rate = fixed_rate
                 sleep_time = 1.0 / rate if rate > 0 else 1.0
 
                 for i in range(rate):
-                    # Generate message based on data type
-                    if data_type == 'shapes':
-                        # value = generate_shapes_data(total_messages_sent)
-                        value = generate_random_data()
-                    elif data_type == 'colors':
-                        # value = generate_colors_data(total_messages_sent)
-                        value = generate_random_data()
-                    else:
-                        value = generate_random_data()
-
+                    value = generate_random_data()
                     key = str(total_messages_sent)
 
-                    # Send message
+                    # Manually serialize key and value
+                    key_bytes = string_serializer(key, SerializationContext(topic, MessageField.KEY))
+                    value_bytes = avro_serializer(value, SerializationContext(topic, MessageField.VALUE))
+
+                    # Debug: Log first 3 messages' serialized bytes
+                    if total_messages_sent < 3:
+                        logger.info(f"Message {total_messages_sent} - value_bytes type: {type(value_bytes)}, len: {len(value_bytes) if value_bytes else 0}")
+                        logger.info(f"Message {total_messages_sent} - first 15 bytes: {list(value_bytes[:15])}")
+                        logger.info(f"Message {total_messages_sent} - hex: {value_bytes[:15].hex()}")
+
+                    # Produce message with serialized bytes
                     producer.produce(
                         topic=topic,
-                        key=key.encode('utf-8'),
-                        value=json.dumps(value).encode('utf-8'),
-                        callback=delivery_report
+                        key=key_bytes,
+                        value=value_bytes,
+                        on_delivery=delivery_report
                     )
 
                     total_messages_sent += 1
-
-                    # Poll for delivery reports
                     producer.poll(0)
-
-                    # Rate limiting
                     time.sleep(sleep_time)
 
-                # Log progress every 100 messages
                 if total_messages_sent % 100 == 0:
                     logger.info(f"Produced {total_messages_sent} messages")
 
             else:
-                # Sinusoidal rate mode (for autoscaler demos)
+                # Sinusoidal rate mode
                 rate = 550 + 450 * math.sin(t/60)
-
                 logger.info(f"Cycle {t}: Target rate = {int(rate)} messages/second")
 
                 for i in range(int(rate)):
                     key = generate_message_key()
                     value = generate_random_data()
 
-                    # Send message
+                    # Manually serialize key and value
+                    key_bytes = string_serializer(key, SerializationContext(topic, MessageField.KEY))
+                    value_bytes = avro_serializer(value, SerializationContext(topic, MessageField.VALUE))
+
+                    # Produce message with serialized bytes
                     producer.produce(
                         topic=topic,
-                        key=key.encode('utf-8'),
-                        value=json.dumps(value).encode('utf-8'),
-                        callback=delivery_report
+                        key=key_bytes,
+                        value=value_bytes,
+                        on_delivery=delivery_report
                     )
 
                     total_messages_sent += 1
 
-                    # Log every 100th message
                     if (i + 1) % 100 == 0:
                         logger.info(f"Sent {i + 1}/{int(rate)} messages in this cycle")
 
-                # Poll for delivery reports
                 producer.poll(0)
-
                 logger.info(f"Completed cycle {t}: Sent {int(rate)} messages. Total: {total_messages_sent}")
-
                 time.sleep(1)
                 t += 1
 
@@ -239,11 +291,8 @@ def main():
         logger.error(f"Unexpected error: {e}", exc_info=True)
 
     finally:
-        # Flush remaining messages
         logger.info("Flushing remaining messages...")
-        remaining = producer.flush(timeout=10)
-        if remaining > 0:
-            logger.warning(f"{remaining} messages were not delivered")
+        producer.flush(timeout=10)
         logger.info(f"Producer stopped. Total messages sent: {total_messages_sent}")
 
 

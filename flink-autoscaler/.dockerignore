@@ -1,0 +1,74 @@
+# Maven build artifacts
+**/target/
+**/dependency-reduced-pom.xml
+**/.mvn/
+
+# Python artifacts
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/.pytest_cache/
+**/.tox/
+**/.coverage
+**/.eggs/
+**/*.egg-info/
+**/dist/
+**/build/
+**/.venv/
+**/venv/
+**/env/
+
+# IDE and editor files
+**/.idea/
+**/.vscode/
+**/*.iml
+**/.project
+**/.classpath
+**/.settings/
+**/*.swp
+**/*.swo
+**/*~
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation and markdown (exclude from image, not needed at runtime)
+*.md
+!schemas/README.md
+
+# Test and CI files
+.github/
+**/.github/
+.semaphore/
+**/*.test
+**/test-*.yaml
+
+# Kubernetes and deployment files (not needed in image)
+*.yaml
+!schemas/*.avsc
+# But we DO need the schemas directory
+
+# Monitoring and observability
+monitoring/
+
+# Terraform
+terraform-iam-user/
+
+# Scripts (not needed in image)
+*.sh
+!**/docker-entrypoint.sh
+
+# Logs
+**/*.log
+**/logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+**/tmp/
+**/temp/
+**/.tmp/

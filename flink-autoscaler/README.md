@@ -4,8 +4,9 @@ This demo showcases Apache Flink's autoscaling capabilities using Confluent Plat
 
 > [!TIP]
 > This application has several versions based upon needs.
-> `v0.1.0` - barebones application with no Authn/Authz expectations and uses JSON-based messages
-> `v0.2.0` - enhanced application with support for OAuth Authentication and use AVRO-based messages
+> - `v0.1.0` - barebones application with no Authn/Authz expectations and uses JSON-based messages
+> - `v0.2.0` - enhanced application with support for OAuth Authentication and use AVRO-based messages
+> 
 > You can use either depending upon cluster needs.
 
 ## Prerequisites

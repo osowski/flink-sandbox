@@ -1,9 +1,12 @@
-apiVersion: cmf.confluent.io/v1
+apiVersion: platform.confluent.io/v1beta1
 kind: FlinkApplication
 metadata:
   name: yt-enricher
   namespace: flink
 spec:
+  cmfRestClassRef:
+    name: cmf-rest-class
+    namespace: flink
   image: quay.io/osowski/yt-enricher:latest
   flinkVersion: v2_1
   serviceAccount: flink

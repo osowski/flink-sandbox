@@ -136,6 +136,74 @@ Key outputs:
 | `bootstrap_servers` | Kubernetes ConfigMap for all pipeline components |
 | `schema_registry_url` | Kubernetes ConfigMap for all pipeline components |
 
+### Step 1.5: Configure the EKS cluster
+
+This step wires External Secrets Operator (ESO) to AWS Secrets Manager so the Flink enricher job can pull credentials at runtime. It assumes ESO is already installed on the cluster.
+
+#### 1.5.1 Get the EKS OIDC issuer
+
+```bash
+aws eks describe-cluster --name <your-cluster-name> \
+  --query "cluster.identity.oidc.issuer" --output text | sed 's|https://||'
+# Output: oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E
+```
+
+#### 1.5.2 Update Terraform and re-apply
+
+Add the OIDC issuer to `terraform/terraform.tfvars`:
+
+```hcl
+eks_oidc_issuer = "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E"
+# Only set these if your ESO install used non-default values:
+# eso_k8s_namespace       = "external-secrets"
+# eso_k8s_service_account = "external-secrets"
+```
+
+Then apply to create the IRSA trust policy on the ESO IAM role:
+
+```bash
+cd terraform/
+terraform plan -out=tfplan
+terraform apply tfplan
+terraform output -raw eso_iam_role_arn
+# Save this ARN for the next step
+```
+
+#### 1.5.3 Annotate the ESO ServiceAccount
+
+```bash
+kubectl annotate serviceaccount external-secrets \
+  -n external-secrets \
+  eks.amazonaws.com/role-arn=<eso_iam_role_arn>
+
+kubectl rollout restart deployment -n external-secrets
+```
+
+#### 1.5.4 Create the ClusterSecretStore
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: aws-secrets-manager
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-east-1
+      auth:
+        jwt:
+          serviceAccountRef:
+            name: external-secrets
+            namespace: external-secrets
+EOF
+
+# Verify it becomes Ready
+kubectl get clustersecretstore aws-secrets-manager
+# STATUS should be: Valid
+```
+
 ### Step 2: Run the Python producer
 
 The producer reads your Google Takeout `watch-history.html` and produces one Avro `RawWatchEvent` per entry to `yt.raw.watch.events`. Credentials are fetched from AWS Secrets Manager at startup — Terraform already populated these in Step 1.

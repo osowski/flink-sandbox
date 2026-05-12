@@ -60,3 +60,4 @@ nbdist/
 # Agent configuration
 .claude/
 */.github/
+docs/superpowers/

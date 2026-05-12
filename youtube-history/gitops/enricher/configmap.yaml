@@ -4,5 +4,10 @@ metadata:
   name: yt-pipeline-config
   namespace: flink
 data:
-  BOOTSTRAP_SERVERS: "REPLACE-WITH-terraform-output-bootstrap-servers"
-  SCHEMA_REGISTRY_URL: "REPLACE-WITH-terraform-output-schema-registry-url"
+  BOOTSTRAP_SERVERS: "REPLACE-WITH-terraform-output-bootstrap-servers" # TODO BEFORE DEPLOYMENT: fill from `terraform output bootstrap_servers`
+  SCHEMA_REGISTRY_URL: "REPLACE-WITH-terraform-output-schema-registry-url" # TODO BEFORE DEPLOYMENT: fill from `terraform output schema_registry_url`
+  TOPIC_RAW_WATCH_EVENTS: "yt.raw.watch.events"
+  TOPIC_VIDEO_METADATA: "yt.video.metadata"
+  TOPIC_ENRICHED_WATCH_EVENTS: "yt.enriched.watch.events"
+  TOPIC_RAW_WATCH_EVENTS_DLQ: "yt.raw.watch.events.dlq"
+  CONSUMER_GROUP_ID: "yt-enricher"

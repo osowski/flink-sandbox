@@ -38,6 +38,7 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
     private final String srUrl;
     private final String srApiKey;
     private final String srApiSecret;
+    private final String metadataTopic;
     private final SerializableLongSupplier clock;
 
     // Flink managed state: checkpointed and restored on restart
@@ -57,6 +58,7 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
             String srUrl,
             String srApiKey,
             String srApiSecret,
+            String metadataTopic,
             SerializableLongSupplier clock) {
         this.clock            = clock != null ? clock : System::currentTimeMillis;
         this.metadataCache    = preloadedCache != null ? preloadedCache : new HashMap<>();
@@ -67,6 +69,7 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
         this.srUrl            = srUrl;
         this.srApiKey         = srApiKey;
         this.srApiSecret      = srApiSecret;
+        this.metadataTopic    = metadataTopic;
     }
 
     @Override
@@ -175,7 +178,7 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
             if (metadataProducer != null) {
                 final String vid = videoId;
                 metadataProducer.send(
-                    new ProducerRecord<>("yt.video.metadata", videoId, metadata),
+                    new ProducerRecord<>(metadataTopic, videoId, metadata),
                     (recordMetadata, ex) -> { if (ex != null) LOG.error("Failed to publish VideoMetadata: videoId={}", vid, ex); }
                 );
             }

@@ -13,8 +13,10 @@ spec:
     execution.checkpointing.interval: "60000"
     execution.checkpointing.mode: EXACTLY_ONCE
     taskmanager.numberOfTaskSlots: "2"
-    state.checkpoints.dir: "s3://REPLACE-MINIO-BUCKET/yt-pipeline/checkpoints/enricher"
-    s3.endpoint: "http://REPLACE-MINIO-SERVICE.REPLACE-NAMESPACE.svc.cluster.local:9000"
+    state.checkpoints.dir: "s3://warehouse/checkpoints/yt-enricher"
+    state.savepoints.dir: "s3://warehouse/savepoints/yt-enricher"
+    high-availability.storageDir: "s3://warehouse/ha/yt-enricher"
+    s3.endpoint: "http://minio.storage.svc.cluster.local:9000"
     s3.path.style.access: "true"
     s3.connection.ssl.enabled: "false"
   jobManager:
@@ -49,10 +51,10 @@ spec:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: yt-minio-creds
-                  key: AWS_ACCESS_KEY_ID
+                  name: minio-credentials
+                  key: root-user
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: yt-minio-creds
-                  key: AWS_SECRET_ACCESS_KEY
+                  name: minio-credentials
+                  key: root-password

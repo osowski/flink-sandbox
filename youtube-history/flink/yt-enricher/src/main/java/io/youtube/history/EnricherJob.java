@@ -20,20 +20,25 @@ public class EnricherJob {
     private static final Logger LOG = LoggerFactory.getLogger(EnricherJob.class);
 
     public static void main(String[] args) throws Exception {
-        String bootstrapServers = required("BOOTSTRAP_SERVERS");
-        String kafkaApiKey      = required("KAFKA_API_KEY");
-        String kafkaApiSecret   = required("KAFKA_API_SECRET");
-        String srUrl            = required("SCHEMA_REGISTRY_URL");
-        String srApiKey         = required("SR_API_KEY");
-        String srApiSecret      = required("SR_API_SECRET");
-        String youtubeApiKey    = required("YOUTUBE_API_KEY");
+        String bootstrapServers  = required("BOOTSTRAP_SERVERS");
+        String kafkaApiKey       = required("KAFKA_API_KEY");
+        String kafkaApiSecret    = required("KAFKA_API_SECRET");
+        String srUrl             = required("SCHEMA_REGISTRY_URL");
+        String srApiKey          = required("SR_API_KEY");
+        String srApiSecret       = required("SR_API_SECRET");
+        String youtubeApiKey     = required("YOUTUBE_API_KEY");
+        String rawTopic          = required("TOPIC_RAW_WATCH_EVENTS");
+        String metadataTopic     = required("TOPIC_VIDEO_METADATA");
+        String enrichedTopic     = required("TOPIC_ENRICHED_WATCH_EVENTS");
+        String dlqTopic          = required("TOPIC_RAW_WATCH_EVENTS_DLQ");
+        String consumerGroupId   = required("CONSUMER_GROUP_ID");
 
         LOG.info("Starting yt-enricher bootstrapServers={} srUrl={}", bootstrapServers, srUrl);
 
         Map<String, VideoMetadata> cache = MetadataBootstrap.load(
             bootstrapServers, kafkaApiKey, kafkaApiSecret,
             srUrl, srApiKey, srApiSecret,
-            "yt.video.metadata"
+            metadataTopic
         );
         LOG.info("Metadata cache ready entries={}", cache.size());
 
@@ -46,8 +51,8 @@ public class EnricherJob {
 
         KafkaSource<RawWatchEvent> source = KafkaSource.<RawWatchEvent>builder()
             .setBootstrapServers(bootstrapServers)
-            .setTopics("yt.raw.watch.events")
-            .setGroupId("yt-enricher")
+            .setTopics(rawTopic)
+            .setGroupId(consumerGroupId)
             // earliest() is intentional: all source topics are fact tables (compacted, idempotent).
             // On first run the job replays full history; yt.video.metadata cache skips re-enrichment
             // for already-seen videos. See README §3 "Start from beginning" for full rationale.
@@ -61,6 +66,7 @@ public class EnricherJob {
             cache, youtubeApiKey,
             bootstrapServers, kafkaApiKey, kafkaApiSecret,
             srUrl, srApiKey, srApiSecret,
+            metadataTopic,
             null
         );
 
@@ -69,11 +75,11 @@ public class EnricherJob {
             .setKafkaProducerConfig(producerProps(bootstrapServers, kafkaApiKey, kafkaApiSecret,
                 srUrl, srApiKey, srApiSecret))
             .setRecordSerializer(KafkaRecordSerializationSchema.<EnrichedWatchEvent>builder()
-                .setTopic("yt.enriched.watch.events")
+                .setTopic(enrichedTopic)
                 .setKeySerializationSchema(e -> Base64.getEncoder().encode(
                     (e.getWatchedAt() + "-" + e.getVideoId()).getBytes(StandardCharsets.UTF_8)))
                 .setValueSerializationSchema(new ConfluentAvroSerializationSchema<>(
-                    "yt.enriched.watch.events", srUrl, srApiKey, srApiSecret))
+                    enrichedTopic, srUrl, srApiKey, srApiSecret))
                 .build())
             .build();
 
@@ -82,10 +88,10 @@ public class EnricherJob {
             .setKafkaProducerConfig(producerProps(bootstrapServers, kafkaApiKey, kafkaApiSecret,
                 srUrl, srApiKey, srApiSecret))
             .setRecordSerializer(KafkaRecordSerializationSchema.<RawWatchEvent>builder()
-                .setTopic("yt.raw.watch.events.dlq")
+                .setTopic(dlqTopic)
                 .setKeySerializationSchema(e -> e.getVideoId().toString().getBytes(StandardCharsets.UTF_8))
                 .setValueSerializationSchema(new ConfluentAvroSerializationSchema<>(
-                    "yt.raw.watch.events.dlq", srUrl, srApiKey, srApiSecret))
+                    dlqTopic, srUrl, srApiKey, srApiSecret))
                 .build())
             .build();
 

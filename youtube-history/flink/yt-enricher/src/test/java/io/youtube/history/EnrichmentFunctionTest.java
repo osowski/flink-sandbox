@@ -97,7 +97,7 @@ class EnrichmentFunctionTest {
         EnrichmentFunction fn = new EnrichmentFunction(
             new HashMap<>(),
             null, null, null, null, null, null, null,
-            null
+            null, null
         );
         fn.setApiClientForTest(mockApi);
 
@@ -127,7 +127,7 @@ class EnrichmentFunctionTest {
         EnrichmentFunction fn = new EnrichmentFunction(
             new HashMap<>(),
             null, null, null, null, null, null, null,
-            null
+            null, null
         );
         fn.setApiClientForTest(mockApi);
 
@@ -167,7 +167,7 @@ class EnrichmentFunctionTest {
         EnrichmentFunction fn = new EnrichmentFunction(
             new HashMap<>(),
             null, null, null, null, null, null, null,
-            null
+            null, null
         );
         fn.setApiClientForTest(mockApi);
 
@@ -201,7 +201,7 @@ class EnrichmentFunctionTest {
         EnrichmentFunction fn = new EnrichmentFunction(
             new HashMap<>(),
             null, null, null, null, null, null, null,
-            null
+            null, null
         );
         fn.setApiClientForTest(mockApi);
 

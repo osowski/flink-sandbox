@@ -56,7 +56,7 @@ Grafana
 - An EKS cluster with an OIDC provider (for External Secrets Operator IRSA)
 - Confluent Platform for Kubernetes Flink operator installed on the cluster (for the `cmf.confluent.io/v1` CRD)
 - External Secrets Operator with a `ClusterSecretStore` named `aws-secrets-manager`
-- MinIO or S3-compatible storage for Flink checkpoint state
+- MinIO deployed in the `storage` namespace at `minio.storage.svc.cluster.local:9000` with a `warehouse` bucket; `minio-credentials` Secret replicated to the `flink` namespace via [Reflector](https://github.com/emberstack/kubernetes-reflector)
 
 ## Setup
 
@@ -230,7 +230,7 @@ The enricher job (`flink/yt-enricher/`) reads `yt.raw.watch.events`, calls the Y
   - [Confluent Platform for Kubernetes](https://docs.confluent.io/operator/current/co-deploy-flink.html) Flink operator installed (provides the `cmf.confluent.io/v1` CRD)
   - [External Secrets Operator](https://external-secrets.io/) installed with a `ClusterSecretStore` named `aws-secrets-manager` pointing to the same AWS region used in Step 1
   - Argo CD installed (optional — you can apply manifests manually instead)
-  - MinIO or S3-compatible storage for Flink checkpoints
+  - MinIO deployed in the `storage` namespace at `minio.storage.svc.cluster.local:9000` with a `warehouse` bucket; `minio-credentials` Secret replicated to the `flink` namespace via Reflector
 
 #### 3.2 Build the fat JAR
 
@@ -271,25 +271,20 @@ data:
   SCHEMA_REGISTRY_URL: "https://psrc-xxxxx.us-east-2.aws.confluent.cloud"
 ```
 
-#### 3.5 Fill in FlinkApplication checkpoint placeholders
+#### 3.5 MinIO checkpoint configuration
 
-`flink/k8s/yt-enricher-app.yaml` has three `REPLACE-*` placeholders for the MinIO/S3 endpoint. Edit the file and set:
+`flink/k8s/yt-enricher-app.yaml` is pre-configured for the cluster-standard MinIO instance:
 
-| Placeholder | Value |
+| Setting | Value |
 |---|---|
-| `REPLACE-MINIO-BUCKET` | MinIO bucket name for Flink state (e.g. `flink-checkpoints`) |
-| `REPLACE-MINIO-SERVICE` | MinIO Kubernetes Service name |
-| `REPLACE-NAMESPACE` | Kubernetes namespace where MinIO runs |
+| `state.checkpoints.dir` | `s3://warehouse/checkpoints/yt-enricher` |
+| `state.savepoints.dir` | `s3://warehouse/savepoints/yt-enricher` |
+| `high-availability.storageDir` | `s3://warehouse/ha/yt-enricher` |
+| `s3.endpoint` | `http://minio.storage.svc.cluster.local:9000` |
 
-MinIO credentials are **not** stored in the manifest. They are pulled from AWS Secrets Manager via the `yt-minio-creds` ExternalSecret (deployed alongside the job in `gitops/enricher/`). Before deploying, store the credentials in Secrets Manager:
+MinIO credentials are **not** stored in the manifest. They are injected from the `minio-credentials` Kubernetes Secret, which is provisioned in the `storage` namespace and replicated to all workload namespaces (including `flink`) by [Reflector](https://github.com/emberstack/kubernetes-reflector). No AWS Secrets Manager secret or ExternalSecret is required for MinIO — the secret will already be present in the namespace before the pod starts.
 
-```bash
-aws secretsmanager create-secret \
-  --name /yt-pipeline/minio/credentials \
-  --secret-string '{"access_key":"<your-minio-access-key>","secret_key":"<your-minio-secret-key>"}'
-```
-
-The External Secrets Operator will inject them as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables, which the Flink S3 plugin picks up automatically via the AWS SDK credential chain.
+The Flink S3 plugin picks up `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` automatically from the environment variables sourced from `minio-credentials`.
 
 #### 3.6 Deploy via Argo CD (recommended)
 

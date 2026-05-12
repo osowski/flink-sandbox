@@ -67,7 +67,7 @@ class EnrichmentFunctionTest {
             preloadedCache,
             "fake-api-key",
             null, null, null, null, null, null,
-            null
+            null, null
         );
 
         try (var harness = buildHarness(fn)) {

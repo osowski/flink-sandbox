@@ -1,0 +1,12 @@
+{
+  "type": "record",
+  "name": "MusicWatchCount",
+  "namespace": "io.youtube.history",
+  "fields": [
+    {"name": "video_id",     "type": "string"},
+    {"name": "title",        "type": "string"},
+    {"name": "channel_name", "type": "string"},
+    {"name": "watch_count",  "type": "long"},
+    {"name": "updated_at",   "type": "long", "logicalType": "timestamp-millis"}
+  ]
+}

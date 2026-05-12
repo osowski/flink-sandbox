@@ -1,0 +1,20 @@
+{
+  "type": "record",
+  "name": "EnrichedWatchEvent",
+  "namespace": "io.youtube.history",
+  "fields": [
+    {"name": "video_id",              "type": "string"},
+    {"name": "url",                   "type": "string"},
+    {"name": "title",                 "type": "string"},
+    {"name": "channel_name",          "type": "string"},
+    {"name": "watched_at",            "type": "string"},
+    {"name": "category_id",           "type": "string"},
+    {"name": "category_name",         "type": "string"},
+    {"name": "topic_categories",      "type": {"type": "array", "items": "string"}, "default": []},
+    {"name": "tags",                  "type": {"type": "array", "items": "string"}, "default": []},
+    {"name": "channel_title",         "type": "string"},
+    {"name": "is_music",              "type": "boolean"},
+    {"name": "classification_reason", "type": "string"},
+    {"name": "produced_at",           "type": "long", "logicalType": "timestamp-millis"}
+  ]
+}

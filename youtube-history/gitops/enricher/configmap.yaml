@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: yt-pipeline-config
+  namespace: flink
+data:
+  BOOTSTRAP_SERVERS: "REPLACE-WITH-terraform-output-bootstrap-servers"
+  SCHEMA_REGISTRY_URL: "REPLACE-WITH-terraform-output-schema-registry-url"

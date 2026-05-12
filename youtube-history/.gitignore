@@ -1,0 +1,38 @@
+# Local-only planning docs (never committed)
+docs/superpowers/
+
+# Personal watch history data (never committed)
+producer/watch-history.html
+
+# Producer runtime config (contains live credentials)
+producer/.env
+
+# Python bytecode
+**/__pycache__/
+*.pyc
+
+# Git worktrees (local only)
+.worktrees/
+
+# Maven build artifacts
+**/target/
+**/dependency-reduced-pom.xml
+# Mac OS files
+.DS_Store
+
+# Terraform state (contains plaintext secrets after apply)
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate
+*.tfstate.*
+
+# Variable files (may contain API keys, secrets)
+*.tfvars
+*.tfvars.json
+
+# Terraform working directory
+.terraform/
+
+# Plan output files
+tfplan
+*.tfplan

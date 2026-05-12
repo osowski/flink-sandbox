@@ -1,0 +1,21 @@
+confluent_cloud_api_key    = ""   # Cloud-level API key (Settings > API keys in Confluent Cloud)
+confluent_cloud_api_secret = ""   # Cloud-level API secret
+youtube_api_key            = ""   # YouTube Data API v3 key
+
+common_tags = {
+  cflt_environment = "devel"
+  cflt_partition   = "onprem"
+  cflt_service     = "osowski/youtube-history"
+  cflt_managed_by  = "terraform"
+  cflt_managed_id  = "osowski/youtube-history"
+  cflt_protected   = "false"
+  cflt_keep_until  = ""   # Required — expiry date (YYYY-MM-DD), e.g. "2027-01-01"
+}
+
+# Optional overrides:
+# confluent_environment_name   = "yt-history"
+# confluent_kafka_cluster_name = "yt-kafka"
+# aws_region                   = "us-east-1"
+# eks_oidc_issuer              = "placeholder.example.com/id/PLACEHOLDER"
+# eso_k8s_namespace            = "external-secrets"
+# eso_k8s_service_account      = "external-secrets"

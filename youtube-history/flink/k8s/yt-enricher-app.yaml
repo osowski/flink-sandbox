@@ -1,0 +1,58 @@
+apiVersion: cmf.confluent.io/v1
+kind: FlinkApplication
+metadata:
+  name: yt-enricher
+  namespace: flink
+spec:
+  image: quay.io/osowski/yt-enricher:latest
+  flinkVersion: v2_1
+  serviceAccount: flink
+  flinkConfiguration:
+    state.backend: rocksdb
+    state.backend.incremental: "true"
+    execution.checkpointing.interval: "60000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+    taskmanager.numberOfTaskSlots: "2"
+    state.checkpoints.dir: "s3://REPLACE-MINIO-BUCKET/yt-pipeline/checkpoints/enricher"
+    s3.endpoint: "http://REPLACE-MINIO-SERVICE.REPLACE-NAMESPACE.svc.cluster.local:9000"
+    s3.path.style.access: "true"
+    s3.connection.ssl.enabled: "false"
+  jobManager:
+    resource:
+      cpu: 1
+      memory: "1024m"
+  taskManager:
+    resource:
+      cpu: 1
+      memory: "2048m"
+  job:
+    jarURI: local:///opt/flink/usrlib/yt-enricher.jar
+    entryClass: io.youtube.history.EnricherJob
+    parallelism: 1
+    state: running
+    upgradeMode: savepoint
+  podTemplate:
+    spec:
+      containers:
+        - name: flink-main-container
+          envFrom:
+            - secretRef:
+                name: yt-enricher-confluent-creds
+            - configMapRef:
+                name: yt-pipeline-config
+          env:
+            - name: YOUTUBE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: yt-youtube-api-key
+                  key: YOUTUBE_API_KEY
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: yt-minio-creds
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: yt-minio-creds
+                  key: AWS_SECRET_ACCESS_KEY

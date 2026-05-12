@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.youtube.history</groupId>
+  <artifactId>youtube-history-flink</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>YouTube History Flink Jobs</name>
+
+  <modules>
+    <module>common</module>
+    <module>yt-enricher</module>
+  </modules>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <flink.version>2.1.1</flink.version>
+    <!-- flink-connector-kafka versioning: <connector>-<flink-minor>. No -2.1 release exists yet;
+         4.0.1-2.0 is the latest stable. Re-evaluate when a -2.1 artifact appears on Maven Central. -->
+    <kafka.connector.version>4.0.1-2.0</kafka.connector.version>
+    <confluent.version>8.2.0</confluent.version>
+    <avro.version>1.11.5</avro.version>
+    <okhttp.version>4.12.0</okhttp.version>
+    <junit.version>5.11.0</junit.version>
+    <surefire.version>3.2.5</surefire.version>
+    <jackson.version>2.17.2</jackson.version>
+  </properties>
+
+  <repositories>
+    <repository>
+      <id>confluent</id>
+      <url>https://packages.confluent.io/maven/</url>
+    </repository>
+  </repositories>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-streaming-java</artifactId>
+        <version>${flink.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-clients</artifactId>
+        <version>${flink.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-connector-kafka</artifactId>
+        <version>${kafka.connector.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.confluent</groupId>
+        <artifactId>kafka-avro-serializer</artifactId>
+        <version>${confluent.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.avro</groupId>
+        <artifactId>avro</artifactId>
+        <version>${avro.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.squareup.okhttp3</groupId>
+        <artifactId>okhttp</artifactId>
+        <version>${okhttp.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.squareup.okhttp3</groupId>
+        <artifactId>mockwebserver</artifactId>
+        <version>${okhttp.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-test-utils</artifactId>
+        <version>${flink.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.flink</groupId>
+        <artifactId>flink-avro</artifactId>
+        <version>${flink.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter</artifactId>
+        <version>${junit.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>${jackson.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>${surefire.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.avro</groupId>
+          <artifactId>avro-maven-plugin</artifactId>
+          <version>${avro.version}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>

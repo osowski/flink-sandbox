@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "RawWatchEvent",
+  "namespace": "io.youtube.history",
+  "fields": [
+    {"name": "video_id",     "type": "string"},
+    {"name": "url",          "type": "string"},
+    {"name": "title",        "type": "string"},
+    {"name": "channel_name", "type": "string"},
+    {"name": "channel_url",  "type": "string"},
+    {"name": "watched_at",   "type": "string", "doc": "ISO-8601 UTC, normalized from HTML"},
+    {"name": "username",     "type": "string", "default": "no-username-provided", "doc": "YouTube account username in @handle format, or sentinel if not provided"},
+    {"name": "produced_at",  "type": "long",   "logicalType": "timestamp-millis"}
+  ]
+}

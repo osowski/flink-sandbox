@@ -1,0 +1,46 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: yt-enricher-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/osowski/youtube-history
+    targetRevision: HEAD
+    path: gitops/enricher
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: flink
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: yt-enricher-job
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/osowski/youtube-history
+    targetRevision: HEAD
+    path: flink/k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: flink
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

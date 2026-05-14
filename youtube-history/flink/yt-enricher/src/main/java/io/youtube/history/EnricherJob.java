@@ -43,6 +43,9 @@ public class EnricherJob {
         LOG.info("Metadata cache ready entries={}", cache.size());
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        // Parallelism 1 is required: all events are keyed on SINGLETON_KEY so they land in a single
+        // partition anyway. Multiple parallel tasks would each hold a separate empty state and
+        // never receive any events, wasting resources.
         env.setParallelism(1);
         env.enableCheckpointing(60_000L);
 
@@ -72,7 +75,7 @@ public class EnricherJob {
 
         KafkaSink<EnrichedWatchEvent> sink = KafkaSink.<EnrichedWatchEvent>builder()
             .setBootstrapServers(bootstrapServers)
-            .setKafkaProducerConfig(producerProps(bootstrapServers, kafkaApiKey, kafkaApiSecret,
+            .setKafkaProducerConfig(producerProps(kafkaApiKey, kafkaApiSecret,
                 srUrl, srApiKey, srApiSecret))
             .setRecordSerializer(KafkaRecordSerializationSchema.<EnrichedWatchEvent>builder()
                 .setTopic(enrichedTopic)
@@ -85,7 +88,7 @@ public class EnricherJob {
 
         KafkaSink<RawWatchEvent> dlqSink = KafkaSink.<RawWatchEvent>builder()
             .setBootstrapServers(bootstrapServers)
-            .setKafkaProducerConfig(producerProps(bootstrapServers, kafkaApiKey, kafkaApiSecret,
+            .setKafkaProducerConfig(producerProps(kafkaApiKey, kafkaApiSecret,
                 srUrl, srApiKey, srApiSecret))
             .setRecordSerializer(KafkaRecordSerializationSchema.<RawWatchEvent>builder()
                 .setTopic(dlqTopic)
@@ -128,7 +131,7 @@ public class EnricherJob {
         return p;
     }
 
-    private static Properties producerProps(String servers, String key, String secret,
+    private static Properties producerProps(String key, String secret,
             String srUrl, String srKey, String srSecret) {
         Properties p = new Properties();
         p.put("security.protocol", "SASL_SSL");
@@ -139,6 +142,8 @@ public class EnricherJob {
         p.put("schema.registry.url", srUrl);
         p.put("basic.auth.credentials.source", "USER_INFO");
         p.put("basic.auth.user.info", srKey + ":" + srSecret);
+        p.put("auto.register.schemas", "false");
+        p.put("use.latest.version", "true");
         p.put("acks", "all");
         p.put("enable.idempotence", "true");
         return p;

@@ -60,7 +60,11 @@ public final class MetadataBootstrap {
             while (!done) {
                 ConsumerRecords<String, VideoMetadata> records = consumer.poll(Duration.ofSeconds(5));
                 for (ConsumerRecord<String, VideoMetadata> r : records) {
-                    cache.put(r.key(), r.value());
+                    if (r.value() == null) {
+                        cache.remove(r.key()); // tombstone: entry was deleted from the compacted topic
+                    } else {
+                        cache.put(r.key(), r.value());
+                    }
                 }
                 done = partitions.stream().allMatch(tp ->
                     consumer.position(tp) >= endOffsets.get(tp));

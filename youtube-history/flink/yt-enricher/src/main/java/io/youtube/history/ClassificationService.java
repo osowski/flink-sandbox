@@ -19,6 +19,7 @@ public final class ClassificationService {
         classifyWithTitle(m, "");
     }
 
+    // Mutates m: sets isMusic and classificationReason based on API metadata + watch-event title.
     public static void classifyWithTitle(VideoMetadata m, String title) {
         if ("10".equals(m.getCategoryId())) {
             m.setIsMusic(true);

@@ -89,6 +89,10 @@ resource "confluent_kafka_topic" "raw_watch_events_dlq" {
   }
 
   depends_on = [confluent_role_binding.tf_kafka_admin]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "confluent_kafka_topic" "music_watch_counts" {

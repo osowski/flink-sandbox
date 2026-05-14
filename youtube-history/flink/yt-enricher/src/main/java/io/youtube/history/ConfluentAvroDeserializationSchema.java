@@ -39,6 +39,8 @@ public class ConfluentAvroDeserializationSchema<T extends SpecificRecord>
     @Override
     @SuppressWarnings("unchecked")
     public T deserialize(byte[] bytes) {
+        // null topic is fine: KafkaAvroDeserializer resolves the schema from the wire-format
+        // magic byte + schema ID, not from the topic name, when specific.avro.reader=true.
         return (T) deserializer.deserialize(null, bytes);
     }
 

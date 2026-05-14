@@ -13,6 +13,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEvent, EnrichedWatchEvent> {
 
@@ -48,6 +51,10 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
     // Transient resources: reconstructed in open()
     private transient YouTubeApiClientPort apiClient;
     private transient KafkaProducer<String, VideoMetadata> metadataProducer;
+
+    // Incremental unique-video-ID count — avoids O(n) ListState scan per event.
+    // Starts empty on restart; timer restored via timerTimestampState ensures eventual flush.
+    private transient Set<String> pendingVideoIds;
 
     public EnrichmentFunction(
             Map<String, VideoMetadata> preloadedCache,
@@ -85,6 +92,9 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
         if (bootstrapServers != null) {
             metadataProducer = buildMetadataProducer();
         }
+
+        pendingVideoIds = new HashSet<>();
+
         LOG.info("EnrichmentFunction open cacheSize={} apiClientReady={}", metadataCache.size(), apiClient != null);
     }
 
@@ -104,6 +114,7 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
         }
 
         pendingEventsState.add(event);
+        pendingVideoIds.add(videoId);
 
         // Register a processing-time timer when the first event of a new batch arrives
         if (timerTimestampState.value() == null) {
@@ -114,7 +125,7 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
         }
 
         // Flush immediately if the batch has reached the YouTube API batch limit
-        if (countUniquePendingVideoIds() >= BATCH_SIZE) {
+        if (pendingVideoIds.size() >= BATCH_SIZE) {
             Long fireAt = timerTimestampState.value();
             if (fireAt != null) {
                 ctx.timerService().deleteProcessingTimeTimer(fireAt);
@@ -128,14 +139,6 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
         flushBatch(ctx, out);
     }
 
-    private int countUniquePendingVideoIds() throws Exception {
-        Set<String> ids = new HashSet<>();
-        for (RawWatchEvent e : pendingEventsState.get()) {
-            ids.add(e.getVideoId().toString());
-        }
-        return ids.size();
-    }
-
     private void flushBatch(Context ctx, Collector<EnrichedWatchEvent> out) throws Exception {
         Map<String, List<RawWatchEvent>> pendingByVideoId = new HashMap<>();
         for (RawWatchEvent event : pendingEventsState.get()) {
@@ -145,6 +148,7 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
 
         pendingEventsState.clear();
         timerTimestampState.clear();
+        pendingVideoIds.clear();
 
         if (pendingByVideoId.isEmpty()) return;
 
@@ -152,6 +156,10 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
             throw new IllegalStateException("apiClient not initialized; YOUTUBE_API_KEY was not provided");
         }
 
+        // State is cleared before the API call. If fetchBatch throws after all retries,
+        // Flink restores from the last checkpoint — the clear above is not committed because
+        // this execution never completed successfully. Events between the last checkpoint and
+        // this failure will be replayed from Kafka on recovery.
         long flushStart = clock.getAsLong();
         List<String> batchIds = new ArrayList<>(pendingByVideoId.keySet());
         Map<String, ApiVideoData> apiResults = apiClient.fetchBatch(batchIds);
@@ -176,11 +184,12 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
             metadataCache.put(videoId, metadata);
 
             if (metadataProducer != null) {
-                final String vid = videoId;
-                metadataProducer.send(
-                    new ProducerRecord<>(metadataTopic, videoId, metadata),
-                    (recordMetadata, ex) -> { if (ex != null) LOG.error("Failed to publish VideoMetadata: videoId={}", vid, ex); }
-                );
+                try {
+                    metadataProducer.send(new ProducerRecord<>(metadataTopic, videoId, metadata))
+                        .get(10, TimeUnit.SECONDS);
+                } catch (ExecutionException | TimeoutException e) {
+                    throw new RuntimeException("Failed to publish VideoMetadata videoId=" + videoId, e);
+                }
             }
 
             for (RawWatchEvent evt : pending) {

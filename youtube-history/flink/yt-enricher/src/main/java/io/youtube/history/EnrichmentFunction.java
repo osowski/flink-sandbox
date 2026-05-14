@@ -234,6 +234,8 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
         props.put("schema.registry.url", srUrl);
         props.put("basic.auth.credentials.source", "USER_INFO");
         props.put("basic.auth.user.info", srApiKey + ":" + srApiSecret);
+        props.put("auto.register.schemas", "false");
+        props.put("use.latest.version", "true");
         props.put("acks", "all");
         props.put("enable.idempotence", "true");
         return new KafkaProducer<>(props);

@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 # Single source of truth for the schema is terraform/schemas/raw_watch_event.avsc.
 # The content loaded here must match that file verbatim — any divergence causes
 # SR error 40403 at runtime because auto.register.schemas=False does an exact lookup.
-_SCHEMA_PATH = Path(__file__).parent.parent / "terraform" / "schemas" / "raw_watch_event.avsc"
+_SCHEMA_PATH = Path(__file__).parent.parent / "schemas" / "RawWatchEvent.avsc"
 RAW_WATCH_EVENT_SCHEMA = _SCHEMA_PATH.read_text()
 
 

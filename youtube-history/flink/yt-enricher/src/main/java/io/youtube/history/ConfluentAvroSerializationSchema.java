@@ -30,6 +30,8 @@ public class ConfluentAvroSerializationSchema<T extends SpecificRecord>
         config.put("schema.registry.url", srUrl);
         config.put("basic.auth.credentials.source", "USER_INFO");
         config.put("basic.auth.user.info", srApiKey + ":" + srApiSecret);
+        config.put("auto.register.schemas", false);
+        config.put("use.latest.version", true);
         serializer = new KafkaAvroSerializer();
         serializer.configure(config, false);
     }

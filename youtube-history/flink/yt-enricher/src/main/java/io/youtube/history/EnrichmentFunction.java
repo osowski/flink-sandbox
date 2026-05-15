@@ -230,7 +230,7 @@ public class EnrichmentFunction extends KeyedProcessFunction<String, RawWatchEve
         return e;
     }
 
-    private KafkaProducer<String, VideoMetadata> buildMetadataProducer() {
+    private KafkaProducer<String, VideoMetadata> buildMetadataProducer() { // See docs/adrs/0002-metadata-publish-plain-kafka-producer.md
         Properties props = new Properties();
         props.put("bootstrap.servers", bootstrapServers);
         props.put("security.protocol", "SASL_SSL");

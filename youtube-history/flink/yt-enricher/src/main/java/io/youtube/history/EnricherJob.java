@@ -99,7 +99,7 @@ public class EnricherJob {
             .build();
 
         SingleOutputStreamOperator<EnrichedWatchEvent> enriched =
-            env.fromSource(source, WatermarkStrategy.noWatermarks(), "raw-watch-events")
+            env.fromSource(source, WatermarkStrategy.noWatermarks(), "raw-watch-events") // See docs/adrs/0003-no-watermarks-on-enricher-source.md
                .keyBy(event -> EnrichmentFunction.SINGLETON_KEY)
                .process(fn);
 

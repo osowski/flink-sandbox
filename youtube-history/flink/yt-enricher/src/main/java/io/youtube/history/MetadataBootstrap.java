@@ -29,8 +29,8 @@ public final class MetadataBootstrap {
 
         Properties props = new Properties();
         props.put("bootstrap.servers", bootstrapServers);
-        props.put("security.protocol", "SASL_SSL");
-        props.put("sasl.mechanism", "PLAIN");
+        props.put("security.protocol", "SASL_SSL"); // TODO-REO NEEDS PARAMETERIZED
+        props.put("sasl.mechanism", "PLAIN"); // TODO-REO NEEDS PARAMETERIZED
         props.put("sasl.jaas.config",
             "org.apache.kafka.common.security.plain.PlainLoginModule required " +
             "username=\"" + kafkaApiKey + "\" password=\"" + kafkaApiSecret + "\";");
@@ -46,7 +46,7 @@ public final class MetadataBootstrap {
 
         Map<String, VideoMetadata> cache = new HashMap<>();
 
-        try (KafkaConsumer<String, VideoMetadata> consumer = new KafkaConsumer<>(props)) {
+        try (KafkaConsumer<String, VideoMetadata> consumer = new KafkaConsumer<>(props)) { // See docs/adrs/0001-metadata-bootstrap-plain-kafka-consumer.md
             List<TopicPartition> partitions = consumer.partitionsFor(topic).stream()
                 .map(p -> new TopicPartition(topic, p.partition()))
                 .toList();

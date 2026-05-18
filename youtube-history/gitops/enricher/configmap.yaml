@@ -4,8 +4,8 @@ metadata:
   name: yt-pipeline-config
   namespace: flink
 data:
-  BOOTSTRAP_SERVERS: "REPLACE-WITH-terraform-output-bootstrap-servers" # TODO BEFORE DEPLOYMENT: fill from `terraform output bootstrap_servers`
-  SCHEMA_REGISTRY_URL: "REPLACE-WITH-terraform-output-schema-registry-url" # TODO BEFORE DEPLOYMENT: fill from `terraform output schema_registry_url`
+  BOOTSTRAP_SERVERS: "SASL_SSL://pkc-oxqxx9.us-east-1.aws.confluent.cloud:9092"
+  SCHEMA_REGISTRY_URL: "https://psrc-4m2v5xk.us-east-1.aws.confluent.cloud"
   TOPIC_RAW_WATCH_EVENTS: "yt.raw.watch.events"
   TOPIC_VIDEO_METADATA: "yt.video.metadata"
   TOPIC_ENRICHED_WATCH_EVENTS: "yt.enriched.watch.events"

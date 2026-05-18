@@ -3,15 +3,18 @@ kind: FlinkApplication
 metadata:
   name: yt-enricher
   namespace: flink
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
 spec:
+  flinkEnvironment: yt-flink-env
+  image: quay.io/osowski/yt-enricher:202605181540
+  flinkVersion: v2_1
+  serviceAccount: flink
   cmfRestClassRef:
     name: cmf-rest-class
     namespace: flink
-  image: quay.io/osowski/yt-enricher:latest
-  flinkVersion: v2_1
-  serviceAccount: flink
   flinkConfiguration:
-    state.backend: rocksdb
+    state.backend.type: rocksdb
     state.backend.incremental: "true"
     execution.checkpointing.interval: "60000"
     execution.checkpointing.mode: EXACTLY_ONCE
@@ -28,7 +31,7 @@ spec:
       memory: "1024m"
   taskManager:
     resource:
-      cpu: 1
+      cpu: 2
       memory: "2048m"
   job:
     jarURI: local:///opt/flink/usrlib/yt-enricher.jar
@@ -46,6 +49,8 @@ spec:
             - configMapRef:
                 name: yt-pipeline-config
           env:
+            - name: ENABLE_BUILT_IN_PLUGINS
+              value: "flink-s3-fs-hadoop-2.1.1-cp2.jar"
             - name: YOUTUBE_API_KEY
               valueFrom:
                 secretKeyRef:

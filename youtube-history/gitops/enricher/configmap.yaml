@@ -4,7 +4,7 @@ metadata:
   name: yt-pipeline-config
   namespace: flink
 data:
-  BOOTSTRAP_SERVERS: "SASL_SSL://pkc-oxqxx9.us-east-1.aws.confluent.cloud:9092"
+  BOOTSTRAP_SERVERS: "pkc-oxqxx9.us-east-1.aws.confluent.cloud:9092"
   SCHEMA_REGISTRY_URL: "https://psrc-4m2v5xk.us-east-1.aws.confluent.cloud"
   TOPIC_RAW_WATCH_EVENTS: "yt.raw.watch.events"
   TOPIC_VIDEO_METADATA: "yt.video.metadata"

@@ -9,9 +9,9 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/osowski/youtube-history
+    repoURL: https://github.com/osowski/flink-sandbox
     targetRevision: HEAD
-    path: gitops/enricher
+    path: youtube-history/gitops/enricher
   destination:
     server: https://kubernetes.default.svc
     namespace: flink
@@ -32,9 +32,9 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/osowski/youtube-history
+    repoURL: https://github.com/osowski/flink-sandbox
     targetRevision: HEAD
-    path: flink/k8s
+    path: youtube-history/flink/k8s
   destination:
     server: https://kubernetes.default.svc
     namespace: flink

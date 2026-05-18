@@ -24,7 +24,7 @@
          4.0.1-2.0 is the latest stable. Re-evaluate when a -2.1 artifact appears on Maven Central. -->
     <kafka.connector.version>4.0.1-2.0</kafka.connector.version>
     <confluent.version>8.2.0</confluent.version>
-    <avro.version>1.11.5</avro.version>
+    <avro.version>1.12.1</avro.version>
     <okhttp.version>4.12.0</okhttp.version>
     <junit.version>5.11.0</junit.version>
     <surefire.version>3.2.5</surefire.version>
@@ -88,7 +88,6 @@
         <groupId>org.apache.flink</groupId>
         <artifactId>flink-avro</artifactId>
         <version>${flink.version}</version>
-        <scope>test</scope>
       </dependency>
       <dependency>
         <groupId>org.junit.jupiter</groupId>

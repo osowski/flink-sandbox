@@ -1,0 +1,45 @@
+# ConfluentRolebindings required for yt-flink-env FlinkEnvironment
+#
+# These are NOT applied from this repo — they belong in confluent-platform-gitops:
+#   workloads/confluent-resources/overlays/eks-demo/confluentrolebindings.yaml
+#
+# CMF uses MDS for authorization. When CFK calls the CMF REST API to create a
+# FlinkApplication, CMF checks MDS to verify the caller (principal: cmf) has
+# ClusterAdmin rights on the target FlinkEnvironment. Without these bindings,
+# CMF returns 401 and the FlinkApplication stays in ERROR state.
+#
+# Apply via:
+#   kubectl apply -f this file -n kafka
+# Or add the two resources below to confluent-platform-gitops and sync via Argo CD.
+---
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+metadata:
+  name: cmf-clusteradmin-yt-flink-env
+  namespace: kafka
+spec:
+  principal:
+    type: user
+    name: cmf
+  role: ClusterAdmin
+  clustersScopeByIds:
+    cmfId: CMF-id
+    flinkEnvironmentId: yt-flink-env
+  kafkaRestClassRef:
+    name: default
+---
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+metadata:
+  name: admin-clusteradmin-yt-flink-env
+  namespace: kafka
+spec:
+  principal:
+    type: user
+    name: admin@dspdemos.com
+  role: ClusterAdmin
+  clustersScopeByIds:
+    cmfId: CMF-id
+    flinkEnvironmentId: yt-flink-env
+  kafkaRestClassRef:
+    name: default

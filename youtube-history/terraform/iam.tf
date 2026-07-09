@@ -114,6 +114,100 @@ locals {
   kafka_creds = { key = confluent_api_key.tf_kafka.id, secret = confluent_api_key.tf_kafka.secret }
 }
 
+# ── sa-yt-enricher read access for CP Flink / CMF (SELECT from any yt.* topic) ──
+# CMF / CP Flink authenticates as sa-yt-enricher and needs READ + DESCRIBE +
+# DESCRIBE_CONFIGS to run Flink SQL. DESCRIBE_CONFIGS is distinct from DESCRIBE and is
+# fetched during SQL validation for BOTH DESCRIBE and SELECT. A single PREFIXED grant per
+# operation over the "yt." topic family covers every topic in the solution at once and
+# supersedes the former per-topic read grants. WRITE stays per-topic (see below).
+resource "confluent_kafka_acl" "enricher_read" {
+  kafka_cluster { id = confluent_kafka_cluster.main.id }
+  resource_type = "TOPIC"
+  resource_name = "yt."
+  pattern_type  = "PREFIXED"
+  principal     = "User:${confluent_service_account.enricher.id}"
+  host          = "*"
+  operation     = "READ"
+  permission    = "ALLOW"
+  rest_endpoint = local.kafka_rest
+  credentials {
+    key    = local.kafka_creds.key
+    secret = local.kafka_creds.secret
+  }
+  depends_on = [confluent_role_binding.tf_kafka_admin]
+}
+
+resource "confluent_kafka_acl" "enricher_describe" {
+  kafka_cluster { id = confluent_kafka_cluster.main.id }
+  resource_type = "TOPIC"
+  resource_name = "yt."
+  pattern_type  = "PREFIXED"
+  principal     = "User:${confluent_service_account.enricher.id}"
+  host          = "*"
+  operation     = "DESCRIBE"
+  permission    = "ALLOW"
+  rest_endpoint = local.kafka_rest
+  credentials {
+    key    = local.kafka_creds.key
+    secret = local.kafka_creds.secret
+  }
+  depends_on = [confluent_role_binding.tf_kafka_admin]
+}
+
+resource "confluent_kafka_acl" "enricher_describe_configs" {
+  kafka_cluster { id = confluent_kafka_cluster.main.id }
+  resource_type = "TOPIC"
+  resource_name = "yt."
+  pattern_type  = "PREFIXED"
+  principal     = "User:${confluent_service_account.enricher.id}"
+  host          = "*"
+  operation     = "DESCRIBE_CONFIGS"
+  permission    = "ALLOW"
+  rest_endpoint = local.kafka_rest
+  credentials {
+    key    = local.kafka_creds.key
+    secret = local.kafka_creds.secret
+  }
+  depends_on = [confluent_role_binding.tf_kafka_admin]
+}
+
+# _confluent_sr_catalog is CMF's internal SR catalog topic (not under the yt. prefix).
+# READ resolves "Failed to initialize cache for Database"; DESCRIBE covers client paths
+# that describe before reading.
+resource "confluent_kafka_acl" "enricher_read_sr_catalog" {
+  kafka_cluster { id = confluent_kafka_cluster.main.id }
+  resource_type = "TOPIC"
+  resource_name = "_confluent_sr_catalog"
+  pattern_type  = "LITERAL"
+  principal     = "User:${confluent_service_account.enricher.id}"
+  host          = "*"
+  operation     = "READ"
+  permission    = "ALLOW"
+  rest_endpoint = local.kafka_rest
+  credentials {
+    key    = local.kafka_creds.key
+    secret = local.kafka_creds.secret
+  }
+  depends_on = [confluent_role_binding.tf_kafka_admin]
+}
+
+resource "confluent_kafka_acl" "enricher_describe_sr_catalog" {
+  kafka_cluster { id = confluent_kafka_cluster.main.id }
+  resource_type = "TOPIC"
+  resource_name = "_confluent_sr_catalog"
+  pattern_type  = "LITERAL"
+  principal     = "User:${confluent_service_account.enricher.id}"
+  host          = "*"
+  operation     = "DESCRIBE"
+  permission    = "ALLOW"
+  rest_endpoint = local.kafka_rest
+  credentials {
+    key    = local.kafka_creds.key
+    secret = local.kafka_creds.secret
+  }
+  depends_on = [confluent_role_binding.tf_kafka_admin]
+}
+
 resource "confluent_kafka_acl" "producer_write_raw" {
   kafka_cluster { id = confluent_kafka_cluster.main.id }
   resource_type = "TOPIC"
@@ -122,40 +216,6 @@ resource "confluent_kafka_acl" "producer_write_raw" {
   principal     = "User:${confluent_service_account.producer.id}"
   host          = "*"
   operation     = "WRITE"
-  permission    = "ALLOW"
-  rest_endpoint = local.kafka_rest
-  credentials {
-    key    = local.kafka_creds.key
-    secret = local.kafka_creds.secret
-  }
-  depends_on = [confluent_role_binding.tf_kafka_admin]
-}
-
-resource "confluent_kafka_acl" "enricher_read_raw" {
-  kafka_cluster { id = confluent_kafka_cluster.main.id }
-  resource_type = "TOPIC"
-  resource_name = confluent_kafka_topic.raw_watch_events.topic_name
-  pattern_type  = "LITERAL"
-  principal     = "User:${confluent_service_account.enricher.id}"
-  host          = "*"
-  operation     = "READ"
-  permission    = "ALLOW"
-  rest_endpoint = local.kafka_rest
-  credentials {
-    key    = local.kafka_creds.key
-    secret = local.kafka_creds.secret
-  }
-  depends_on = [confluent_role_binding.tf_kafka_admin]
-}
-
-resource "confluent_kafka_acl" "enricher_read_metadata" {
-  kafka_cluster { id = confluent_kafka_cluster.main.id }
-  resource_type = "TOPIC"
-  resource_name = confluent_kafka_topic.video_metadata.topic_name
-  pattern_type  = "LITERAL"
-  principal     = "User:${confluent_service_account.enricher.id}"
-  host          = "*"
-  operation     = "READ"
   permission    = "ALLOW"
   rest_endpoint = local.kafka_rest
   credentials {
@@ -286,57 +346,6 @@ resource "confluent_kafka_acl" "producer_describe_raw" {
   depends_on = [confluent_role_binding.tf_kafka_admin]
 }
 
-resource "confluent_kafka_acl" "enricher_describe_raw" {
-  kafka_cluster { id = confluent_kafka_cluster.main.id }
-  resource_type = "TOPIC"
-  resource_name = confluent_kafka_topic.raw_watch_events.topic_name
-  pattern_type  = "LITERAL"
-  principal     = "User:${confluent_service_account.enricher.id}"
-  host          = "*"
-  operation     = "DESCRIBE"
-  permission    = "ALLOW"
-  rest_endpoint = local.kafka_rest
-  credentials {
-    key    = local.kafka_creds.key
-    secret = local.kafka_creds.secret
-  }
-  depends_on = [confluent_role_binding.tf_kafka_admin]
-}
-
-resource "confluent_kafka_acl" "enricher_describe_metadata" {
-  kafka_cluster { id = confluent_kafka_cluster.main.id }
-  resource_type = "TOPIC"
-  resource_name = confluent_kafka_topic.video_metadata.topic_name
-  pattern_type  = "LITERAL"
-  principal     = "User:${confluent_service_account.enricher.id}"
-  host          = "*"
-  operation     = "DESCRIBE"
-  permission    = "ALLOW"
-  rest_endpoint = local.kafka_rest
-  credentials {
-    key    = local.kafka_creds.key
-    secret = local.kafka_creds.secret
-  }
-  depends_on = [confluent_role_binding.tf_kafka_admin]
-}
-
-resource "confluent_kafka_acl" "enricher_describe_enriched" {
-  kafka_cluster { id = confluent_kafka_cluster.main.id }
-  resource_type = "TOPIC"
-  resource_name = confluent_kafka_topic.enriched_watch_events.topic_name
-  pattern_type  = "LITERAL"
-  principal     = "User:${confluent_service_account.enricher.id}"
-  host          = "*"
-  operation     = "DESCRIBE"
-  permission    = "ALLOW"
-  rest_endpoint = local.kafka_rest
-  credentials {
-    key    = local.kafka_creds.key
-    secret = local.kafka_creds.secret
-  }
-  depends_on = [confluent_role_binding.tf_kafka_admin]
-}
-
 resource "confluent_kafka_acl" "enricher_write_dlq" {
   kafka_cluster { id = confluent_kafka_cluster.main.id }
   resource_type = "TOPIC"
@@ -345,23 +354,6 @@ resource "confluent_kafka_acl" "enricher_write_dlq" {
   principal     = "User:${confluent_service_account.enricher.id}"
   host          = "*"
   operation     = "WRITE"
-  permission    = "ALLOW"
-  rest_endpoint = local.kafka_rest
-  credentials {
-    key    = local.kafka_creds.key
-    secret = local.kafka_creds.secret
-  }
-  depends_on = [confluent_role_binding.tf_kafka_admin]
-}
-
-resource "confluent_kafka_acl" "enricher_describe_dlq" {
-  kafka_cluster { id = confluent_kafka_cluster.main.id }
-  resource_type = "TOPIC"
-  resource_name = confluent_kafka_topic.raw_watch_events_dlq.topic_name
-  pattern_type  = "LITERAL"
-  principal     = "User:${confluent_service_account.enricher.id}"
-  host          = "*"
-  operation     = "DESCRIBE"
   permission    = "ALLOW"
   rest_endpoint = local.kafka_rest
   credentials {

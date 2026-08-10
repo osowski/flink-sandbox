@@ -244,7 +244,11 @@ INPUT_FILE=./watch-history.html
 
 # Secret path — matches what Terraform created; leave as default
 SM_SECRET_PATH=/yt-pipeline/confluent/producer
-AWS_REGION=us-east-1
+
+# Region the secret lives in. Deliberately not AWS_REGION: `assume` and the AWS
+# SDKs export that, and a profile in another region would silently redirect the
+# lookup. load_dotenv() does not override already-exported variables.
+SM_AWS_REGION=us-east-1
 ```
 
 > `.env` is gitignored. Never commit it.

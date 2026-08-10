@@ -95,7 +95,7 @@ def main():
     sr_url            = os.environ["SCHEMA_REGISTRY_URL"]
     input_file        = os.environ["INPUT_FILE"]
     sm_secret_path    = os.environ["SM_SECRET_PATH"]
-    aws_region        = os.environ.get("AWS_REGION", "us-east-1")
+    aws_region        = os.environ.get("SM_AWS_REGION", "us-east-1")
     topic             = os.environ.get("KAFKA_TOPIC", "yt.raw.watch.events")
     username          = _resolve_username(args.username, os.environ.get("YOUTUBE_USERNAME"))
 
@@ -104,7 +104,10 @@ def main():
     try:
         creds = fetch_confluent_credentials(sm_secret_path, aws_region)
     except Exception as exc:
-        log.error("Failed to fetch credentials from Secrets Manager: %s", type(exc).__name__)
+        log.error(
+            "Failed to fetch credentials from Secrets Manager (path=%s, region=%s): %s",
+            sm_secret_path, aws_region, exc,
+        )
         raise SystemExit(1) from exc
 
     sr_client = SchemaRegistryClient({

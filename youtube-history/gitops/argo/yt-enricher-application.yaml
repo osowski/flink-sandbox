@@ -2,6 +2,29 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
+  name: yt-enricher-platform-rbac
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/osowski/flink-sandbox
+    targetRevision: HEAD
+    path: youtube-history/gitops/platform-rbac
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
   name: yt-enricher-config
   namespace: argocd
   annotations:

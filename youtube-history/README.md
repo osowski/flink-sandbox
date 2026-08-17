@@ -358,9 +358,11 @@ MinIO credentials are **not** stored in the manifest. They are injected from the
 
 The Flink S3 plugin picks up `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` automatically from the environment variables sourced from `minio-credentials`.
 
+> **Why platform RBAC is required.** On an RBAC-enabled Confluent Platform cluster, CMF authorizes every FlinkApplication write against the in-cluster Kafka MDS. Creating the enricher application requires the `cmf` principal to hold `ClusterAdmin` scoped to the `yt-flink-env` FlinkEnvironment. Without the `ConfluentRolebinding`s in `gitops/platform-rbac/`, CMF rejects the create with a bare `401` and the FlinkApplication stays in `ERROR` state (`CMFSYNC.STATUS=Failed`). These bindings live in the platform-owned `kafka` namespace and require the in-cluster Kafka MDS to be running.
+
 #### 3.6 Deploy via Argo CD (recommended)
 
-Apply the two Argo CD `Application` resources once. Argo CD will sync the enricher config (ExternalSecrets + ConfigMap) in wave 0 before starting the FlinkApplication in wave 1:
+Apply the Argo CD `Application` resources once. Argo CD syncs the platform RBAC bindings (`kafka` namespace) in wave -1, then the enricher config (ExternalSecrets + ConfigMap) in wave 0, then starts the FlinkApplication in wave 1:
 
 ```bash
 kubectl apply -f gitops/argo/yt-enricher-application.yaml
@@ -369,7 +371,7 @@ kubectl apply -f gitops/argo/yt-enricher-application.yaml
 Verify the Applications become `Healthy` and `Synced`:
 
 ```bash
-kubectl get applications -n argocd yt-enricher-config yt-enricher-job
+kubectl get applications -n argocd yt-enricher-platform-rbac yt-enricher-config yt-enricher-job
 ```
 
 #### 3.7 Deploy manually (alternative)
@@ -377,13 +379,19 @@ kubectl get applications -n argocd yt-enricher-config yt-enricher-job
 If you are not using Argo CD, apply the manifests in order:
 
 ```bash
-# 1. ExternalSecrets + ConfigMap (must be ready before the job starts)
+# 1. Platform RBAC: ConfluentRolebindings that authorize CMF for yt-flink-env
+#    (kafka namespace; the in-cluster Kafka MDS must be up)
+kubectl apply -f gitops/platform-rbac/confluentrolebindings-yt-flink-env.yaml -n kafka
+kubectl wait --for=jsonpath='{.status.state}'=CREATED \
+  confluentrolebinding/cmf-clusteradmin-yt-flink-env -n kafka --timeout=120s
+
+# 2. ExternalSecrets + ConfigMap (must be ready before the job starts)
 kubectl apply -f gitops/enricher/
 
-# 2. Wait for ExternalSecrets to pull credentials from Secrets Manager
+# 3. Wait for ExternalSecrets to pull credentials from Secrets Manager
 kubectl wait --for=condition=Ready externalsecret -n flink --all --timeout=120s
 
-# 3. FlinkApplication
+# 4. FlinkApplication
 kubectl apply -f flink/k8s/yt-enricher-app.yaml
 ```
 

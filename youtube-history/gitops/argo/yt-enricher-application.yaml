@@ -1,4 +1,33 @@
 ---
+# Platform RBAC: ConfluentRolebindings that grant principal `cmf` ClusterAdmin
+# scoped to the yt-flink-env FlinkEnvironment. CMF authorizes FlinkApplication
+# writes against the in-cluster Kafka MDS, so without these bindings the
+# yt-enricher FlinkApplication create returns 401. Synced first (wave -1) so the
+# bindings exist before the FlinkEnvironment/FlinkApplication (waves 0/1) sync.
+# Targets the platform-owned `kafka` namespace (assumed already present).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: yt-enricher-platform-rbac
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/osowski/flink-sandbox
+    targetRevision: HEAD
+    path: youtube-history/gitops/platform-rbac
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

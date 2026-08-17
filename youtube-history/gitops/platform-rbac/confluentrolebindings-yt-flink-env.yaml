@@ -1,16 +1,25 @@
-# ConfluentRolebindings required for yt-flink-env FlinkEnvironment
+# ConfluentRolebindings required for the yt-flink-env FlinkEnvironment.
 #
-# These are NOT applied from this repo — they belong in confluent-platform-gitops:
-#   workloads/confluent-resources/overlays/eks-demo/confluentrolebindings.yaml
+# CMF authorizes FlinkApplication writes against the in-cluster Kafka MDS. When
+# CFK calls the CMF REST API to create the yt-enricher FlinkApplication, CMF
+# checks MDS to verify the caller (principal: cmf) holds ClusterAdmin on the
+# target FlinkEnvironment. Without these bindings CMF returns 401 and the
+# FlinkApplication stays in ERROR state.
 #
-# CMF uses MDS for authorization. When CFK calls the CMF REST API to create a
-# FlinkApplication, CMF checks MDS to verify the caller (principal: cmf) has
-# ClusterAdmin rights on the target FlinkEnvironment. Without these bindings,
-# CMF returns 401 and the FlinkApplication stays in ERROR state.
+# Delivery: applied by the `yt-enricher-platform-rbac` Argo CD Application
+# (gitops/argo/yt-enricher-application.yaml, sync-wave -1) into the `kafka`
+# namespace, ahead of the FlinkEnvironment/FlinkApplication.
 #
-# Apply via:
-#   kubectl apply -f this file -n kafka
-# Or add the two resources below to confluent-platform-gitops and sync via Argo CD.
+# Manual (non-Argo) deploy: kubectl apply -f this file -n kafka
+#
+# Requires the in-cluster Kafka MDS to be up; the bindings are scoped to the
+# environment id, so this file is specific to yt-flink-env.
+#
+# NOTE: `cmfId: CMF-id` below is the literal, fixed CFK->CMF cluster identifier
+# used by every Flink-environment ConfluentRolebinding on this platform (the
+# working colors-env/shapes-env bindings use the same value). It is NOT a
+# placeholder — do not substitute a "real-looking" id, or MDS scopes the grant
+# to a non-existent cluster and CMF app-create returns 401.
 ---
 apiVersion: platform.confluent.io/v1beta1
 kind: ConfluentRolebinding

@@ -3,7 +3,7 @@ name: Build and Push Container Images
 on:
   push:
     branches: [main]
-    tags: ['v*', 'flink-autoscaler-v*']
+    tags: ['flink-autoscaler-v*']
   pull_request:
     branches: [main]
   workflow_dispatch: {}
@@ -52,11 +52,11 @@ jobs:
             flink:
               - 'flink-autoscaler/flink-java-app/**'
               - 'flink-autoscaler/schemas/**'
-              - '.github/workflows/build-images.yml'
+              - '.github/workflows/flink-autoscaler-build-images.yml'
             producer:
               - 'flink-autoscaler/python-producer/**'
               - 'flink-autoscaler/schemas/**'
-              - '.github/workflows/build-images.yml'
+              - '.github/workflows/flink-autoscaler-build-images.yml'
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -91,7 +91,6 @@ jobs:
     needs: preflight
     if: >
       github.event_name == 'workflow_dispatch' ||
-      startsWith(github.ref, 'refs/tags/v') ||
       startsWith(github.ref, 'refs/tags/flink-autoscaler-v') ||
       needs.preflight.outputs.flink_changed == 'true'
     runs-on: ubuntu-latest
@@ -152,7 +151,6 @@ jobs:
     needs: preflight
     if: >
       github.event_name == 'workflow_dispatch' ||
-      startsWith(github.ref, 'refs/tags/v') ||
       startsWith(github.ref, 'refs/tags/flink-autoscaler-v') ||
       needs.preflight.outputs.producer_changed == 'true'
     runs-on: ubuntu-latest

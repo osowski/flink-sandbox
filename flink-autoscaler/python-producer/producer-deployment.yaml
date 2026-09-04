@@ -26,6 +26,8 @@ spec:
           value: "kafka:9092"
         - name: KAFKA_TOPIC
           value: "autoscale-demo"
+        - name: SCHEMA_REGISTRY_URL
+          value: "http://schemaregistry.kafka.svc.cluster.local:8081"
         resources:
           requests:
             memory: "128Mi"

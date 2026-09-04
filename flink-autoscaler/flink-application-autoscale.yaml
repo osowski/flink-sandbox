@@ -105,3 +105,5 @@ spec:
               value: "autoscale-demo-out"
             - name: KAFKA_CONSUMER_GROUP
               value: "flink-consumer-group-beta"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://schemaregistry.kafka.svc.cluster.local:8081"

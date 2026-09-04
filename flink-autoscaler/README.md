@@ -95,6 +95,34 @@ spec:
       resourceType: Subject
 ```
 
+## Image Versioning
+
+Both container images share one version number, independent of the
+underlying Flink/Confluent Platform release: published tags look like
+`v1.0.0-202609041200` (`<repo-version>-<UTC build timestamp>`), plus a
+floating `:latest`. `<repo-version>` comes from the most recent
+`flink-autoscaler-v*` git tag — bump it by pushing a new tag
+(`git tag flink-autoscaler-v1.1.0 && git push-external origin flink-autoscaler-v1.1.0`)
+when either app changes in a way worth marking, not on every build.
+
+To see exactly which dependency versions are baked into a given tag,
+check out that tag's commit and read the two files that pin them —
+they're the single source of truth, so a table here would just go stale:
+
+- **`flink-kafka-demo`**: `flink-autoscaler/flink-java-app/pom.xml`
+  (`flink.version`, `confluent.version`, `avro.version`,
+  `flink-connector-kafka`, `kafka-clients`) and the base image in
+  `flink-autoscaler/flink-java-app/Dockerfile`
+- **`kafka-producer`**: `flink-autoscaler/python-producer/requirements.txt`
+  (`confluent-kafka`, `fastavro`) and the Python version in
+  `flink-autoscaler/python-producer/Dockerfile.producer`
+
+As of `v1.0.0`: Flink 2.2.0 / Confluent Schema Registry client 8.2.0 /
+Avro 1.12.1 / `flink-connector-kafka` 5.0.0-2.2 / `kafka-clients` 4.2.0 /
+base image `confluentinc/cp-flink:2.2.0-cp2-java11` (flink-kafka-demo);
+`confluent-kafka[avro,schema-registry]>=2.3.0` / `fastavro>=1.9.0` /
+Python 3.11-slim (kafka-producer).
+
 ## Quick Start
 
 ### 1. Build the Flink Java Application

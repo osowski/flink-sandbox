@@ -22,10 +22,20 @@ jobs:
       flink_platforms: ${{ steps.check.outputs.flink_platforms }}
       flink_changed: ${{ steps.filter.outputs.flink }}
       producer_changed: ${{ steps.filter.outputs.producer }}
+      repo_version: ${{ steps.version.outputs.repo_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Resolve shared repo version
+        id: version
+        run: |
+          set -euo pipefail
+          RAW_TAG=$(git describe --tags --match 'flink-autoscaler-v*' --abbrev=0)
+          REPO_VERSION=${RAW_TAG#flink-autoscaler-}
+          echo "Resolved repo_version=$REPO_VERSION (from tag $RAW_TAG)"
+          echo "repo_version=$REPO_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Detect changed paths
         id: filter
@@ -92,10 +102,7 @@ jobs:
 
       - name: Resolve version tag
         id: tag
-        working-directory: flink-autoscaler/flink-java-app
-        run: |
-          FLINK_VERSION=$(grep -m1 '<flink.version>' pom.xml | sed -E 's/.*<flink.version>(.*)<\/flink.version>.*/\1/')
-          echo "version_tag=${FLINK_VERSION}-$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+        run: echo "version_tag=${{ needs.preflight.outputs.repo_version }}-$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
         with:
@@ -137,7 +144,7 @@ jobs:
 
       - name: Resolve version tag
         id: tag
-        run: echo "version_tag=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+        run: echo "version_tag=${{ needs.preflight.outputs.repo_version }}-$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
         with:

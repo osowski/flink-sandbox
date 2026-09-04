@@ -5,15 +5,19 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.connector.kafka.source.KafkaSource;
-import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
+import org.apache.flink.formats.avro.registry.confluent.ConfluentRegistryAvroDeserializationSchema;
+import org.apache.flink.formats.avro.registry.confluent.ConfluentRegistryAvroSerializationSchema;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.util.Collector;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+
+import com.confluent.examples.sensors.SensorEvent;
+import com.confluent.examples.sensors.ProcessedSensorEvent;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -21,8 +25,6 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class KafkaFlinkJob {
 
@@ -53,26 +55,37 @@ public class KafkaFlinkJob {
     }
 
     /**
-     * Custom deserializer that extracts both key and value from Kafka records
+     * Custom deserializer that extracts both key and value from Kafka records.
+     * Key: plain UTF-8 string. Value: Avro deserialization via Schema Registry.
      */
-    public static class KeyValueDeserializer implements KafkaRecordDeserializationSchema<Tuple2<String, String>> {
+    public static class KeyValueDeserializer implements KafkaRecordDeserializationSchema<Tuple2<String, SensorEvent>> {
+        private final ConfluentRegistryAvroDeserializationSchema<SensorEvent> avroDeserializer;
+
+        public KeyValueDeserializer(String schemaRegistryUrl, Map<String, String> schemaRegistryConfig) {
+            this.avroDeserializer = ConfluentRegistryAvroDeserializationSchema.forSpecific(
+                SensorEvent.class,
+                schemaRegistryUrl,
+                schemaRegistryConfig
+            );
+        }
+
         @Override
-        public void deserialize(ConsumerRecord<byte[], byte[]> record, Collector<Tuple2<String, String>> out) throws IOException {
+        public void deserialize(ConsumerRecord<byte[], byte[]> record, Collector<Tuple2<String, SensorEvent>> out) throws IOException {
             String key = record.key() != null ? new String(record.key(), StandardCharsets.UTF_8) : null;
-            String value = record.value() != null ? new String(record.value(), StandardCharsets.UTF_8) : null;
+            SensorEvent value = record.value() != null ? avroDeserializer.deserialize(record.value()) : null;
             out.collect(Tuple2.of(key, value));
         }
 
         @Override
-        public TypeInformation<Tuple2<String, String>> getProducedType() {
-            return Types.TUPLE(Types.STRING, Types.STRING);
+        public TypeInformation<Tuple2<String, SensorEvent>> getProducedType() {
+            return Types.TUPLE(Types.STRING, Types.GENERIC(SensorEvent.class));
         }
     }
 
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-        // Get Flink configuration to read kafka.* properties
+        // Get Flink configuration to read kafka.* / schema.registry.* properties
         org.apache.flink.configuration.Configuration flinkConfig =
             (org.apache.flink.configuration.Configuration) env.getConfiguration();
 
@@ -87,6 +100,15 @@ public class KafkaFlinkJob {
             }
         }
 
+        // Extract all schema.registry.* properties from Flink configuration
+        // (e.g. schema.registry.bearer.auth.* for OAuth-secured Schema Registry)
+        Map<String, String> schemaRegistryConfig = new HashMap<>();
+        for (String key : flinkConfig.keySet()) {
+            if (key.startsWith("schema.registry.")) {
+                schemaRegistryConfig.put(key, flinkConfig.getString(key, ""));
+            }
+        }
+
         // Get configuration from Flink config with environment variable fallback
         // This maintains backward compatibility with existing deployments
         String kafkaBootstrapServers = flinkConfig.getString("kafka.bootstrap.servers",
@@ -95,51 +117,50 @@ public class KafkaFlinkJob {
                 System.getenv().getOrDefault("KAFKA_TOPIC", "autoscale-demo"));
         String consumerGroup = flinkConfig.getString("kafka.consumer.group.id",
                 System.getenv().getOrDefault("KAFKA_CONSUMER_GROUP", "flink-consumer"));
+        String schemaRegistryUrl = flinkConfig.getString("schema.registry.url",
+                System.getenv().getOrDefault("SCHEMA_REGISTRY_URL", "http://schemaregistry.kafka.svc.cluster.local:8081"));
 
         System.out.println("Starting Kafka Flink Job");
         System.out.println("Kafka Bootstrap Servers: " + kafkaBootstrapServers);
         System.out.println("Kafka Topic: " + kafkaTopic);
         System.out.println("Consumer Group: " + consumerGroup);
         System.out.println("Kafka Properties: " + kafkaProps.size() + " properties loaded from Flink configuration");
+        System.out.println("Schema Registry URL: " + schemaRegistryUrl);
+        System.out.println("Schema Registry Properties: " + schemaRegistryConfig.size() + " properties loaded from Flink configuration");
 
         // Disable operator chaining for better visibility in Flink UI
         env.disableOperatorChaining();
 
-        // Configure Kafka source with key-value deserialization
-        // Now includes all kafka.* properties from Flink configuration for OAuth/security support
-        // Note: Starting offset is controlled by kafka.consumer.auto.offset.reset property
-        // from FlinkApplication configuration (typically "earliest" or "latest")
-        KafkaSource<Tuple2<String, String>> source = KafkaSource.<Tuple2<String, String>>builder()
+        // Configure Kafka source with key-value deserialization.
+        // Note: no explicit setStartingOffsets() call here — the job respects
+        // whatever kafka.consumer.auto.offset.reset is set in FlinkApplication
+        // config (or the Kafka client default) rather than hardcoding a value.
+        KafkaSource<Tuple2<String, SensorEvent>> source = KafkaSource.<Tuple2<String, SensorEvent>>builder()
                 .setBootstrapServers(kafkaBootstrapServers)
                 .setTopics(kafkaTopic)
                 .setGroupId(consumerGroup)
                 .setProperties(kafkaProps)  // Pass all Kafka properties including security config
-                .setDeserializer(new KeyValueDeserializer())
+                .setDeserializer(new KeyValueDeserializer(schemaRegistryUrl, schemaRegistryConfig))
                 .build();
 
         // Create data stream from Kafka
-        DataStream<Tuple2<String, String>> stream = env.fromSource(source, WatermarkStrategy.noWatermarks(), "Kafka Source")
+        DataStream<Tuple2<String, SensorEvent>> stream = env.fromSource(source, WatermarkStrategy.noWatermarks(), "Kafka Source")
                 .disableChaining();
 
         // Process records with CPU-intensive transformations
-        DataStream<Tuple2<String, String>> processedStream = stream.process(new ProcessFunction<Tuple2<String, String>, Tuple2<String, String>>() {
-            private final ObjectMapper objectMapper = new ObjectMapper();
-
+        DataStream<Tuple2<String, ProcessedSensorEvent>> processedStream = stream.process(new ProcessFunction<Tuple2<String, SensorEvent>, Tuple2<String, ProcessedSensorEvent>>() {
             @Override
-            public void processElement(Tuple2<String, String> keyValue, Context ctx, Collector<Tuple2<String, String>> out) throws Exception {
+            public void processElement(Tuple2<String, SensorEvent> keyValue, Context ctx, Collector<Tuple2<String, ProcessedSensorEvent>> out) throws Exception {
                 String key = keyValue.f0;
-                String value = keyValue.f1;
+                SensorEvent sensorEvent = keyValue.f1;
+
+                if (sensorEvent == null) {
+                    return;  // Skip null events
+                }
 
                 try {
-                    // Parse JSON message
-                    JsonNode jsonNode = objectMapper.readTree(value);
-
-                    // Extract timestamp and location fields
-                    String timestamp = jsonNode.has("timestamp") ? jsonNode.get("timestamp").asText() : "unknown";
-                    String location = jsonNode.has("location") ? jsonNode.get("location").asText() : "unknown";
-
                     // Step 1: Join timestamp and location
-                    String combined = timestamp + ":" + location;
+                    String combined = sensorEvent.getTimestamp() + ":" + sensorEvent.getLocation();
 
                     // Step 2: Convert to uppercase
                     String uppercase = combined.toUpperCase();
@@ -155,24 +176,37 @@ public class KafkaFlinkJob {
                     // Step 5: Base64 encode the result
                     String encoded = Base64.getEncoder().encodeToString(ciphered.getBytes());
 
-                    // Step 6: Add the encoded field to the original message
-                    com.fasterxml.jackson.databind.node.ObjectNode outputNode;
-                    if (jsonNode.isObject()) {
-                        outputNode = (com.fasterxml.jackson.databind.node.ObjectNode) jsonNode;
-                    } else {
-                        outputNode = objectMapper.createObjectNode();
-                        outputNode.put("original", value);
-                    }
-                    outputNode.put("encoded", encoded);
+                    // Step 6: Emit the enriched event, same key
+                    ProcessedSensorEvent processedEvent = ProcessedSensorEvent.newBuilder()
+                            .setTimestamp(sensorEvent.getTimestamp())
+                            .setType(sensorEvent.getType())
+                            .setLocation(sensorEvent.getLocation())
+                            .setValue(sensorEvent.getValue())
+                            .setStatus(sensorEvent.getStatus())
+                            .setId(sensorEvent.getId())
+                            .setEncoded(encoded)
+                            .setError(null)
+                            .setOriginal(null)
+                            .build();
 
-                    // Emit the updated JSON message with the same key
-                    out.collect(Tuple2.of(key, objectMapper.writeValueAsString(outputNode)));
+                    out.collect(Tuple2.of(key, processedEvent));
                 } catch (Exception e) {
-                    // Log parsing errors but continue processing - emit error as JSON
-                    com.fasterxml.jackson.databind.node.ObjectNode errorNode = objectMapper.createObjectNode();
-                    errorNode.put("error", e.getMessage());
-                    errorNode.put("original", value);
-                    out.collect(Tuple2.of(key, objectMapper.writeValueAsString(errorNode)));
+                    // Emit an error record instead of dropping it — mirrors the
+                    // original JSON version's error object, now as a valid
+                    // ProcessedSensorEvent (error/original are the fields that
+                    // exist specifically to carry this).
+                    ProcessedSensorEvent errorEvent = ProcessedSensorEvent.newBuilder()
+                            .setTimestamp(sensorEvent.getTimestamp() != null ? sensorEvent.getTimestamp() : "unknown")
+                            .setType(sensorEvent.getType() != null ? sensorEvent.getType() : "unknown")
+                            .setLocation(sensorEvent.getLocation() != null ? sensorEvent.getLocation() : "unknown")
+                            .setValue(sensorEvent.getValue())
+                            .setStatus(sensorEvent.getStatus() != null ? sensorEvent.getStatus() : "unknown")
+                            .setId(sensorEvent.getId() != null ? sensorEvent.getId() : "unknown")
+                            .setEncoded(null)
+                            .setError(e.getMessage())
+                            .setOriginal(sensorEvent.toString())
+                            .build();
+                    out.collect(Tuple2.of(key, errorEvent));
                 }
             }
         })
@@ -183,21 +217,36 @@ public class KafkaFlinkJob {
         String outputTopic = flinkConfig.getString("kafka.output.topic",
                 System.getenv().getOrDefault("KAFKA_OUTPUT_TOPIC", "autoscale-demo-out"));
 
-        KafkaSink<Tuple2<String, String>> sink = KafkaSink.<Tuple2<String, String>>builder()
+        // Avro serializer for ProcessedSensorEvent values. Subject defaults to
+        // "<outputTopic>-value" (Confluent's TopicNameStrategy), so it tracks
+        // whatever output topic name this deployment is configured with.
+        ConfluentRegistryAvroSerializationSchema<ProcessedSensorEvent> avroSerializer =
+                ConfluentRegistryAvroSerializationSchema.forSpecific(
+                        ProcessedSensorEvent.class,
+                        outputTopic + "-value",
+                        schemaRegistryUrl,
+                        schemaRegistryConfig
+                );
+
+        KafkaSink<Tuple2<String, ProcessedSensorEvent>> sink = KafkaSink.<Tuple2<String, ProcessedSensorEvent>>builder()
                 .setBootstrapServers(kafkaBootstrapServers)
                 .setKafkaProducerConfig(kafkaProps)  // Pass all Kafka properties including security config
                 .setRecordSerializer(KafkaRecordSerializationSchema.builder()
                         .setTopic(outputTopic)
-                        .setKeySerializationSchema(new org.apache.flink.api.common.serialization.SerializationSchema<Tuple2<String, String>>() {
+                        .setKeySerializationSchema(new org.apache.flink.api.common.serialization.SerializationSchema<Tuple2<String, ProcessedSensorEvent>>() {
                             @Override
-                            public byte[] serialize(Tuple2<String, String> element) {
+                            public byte[] serialize(Tuple2<String, ProcessedSensorEvent> element) {
                                 return element.f0 != null ? element.f0.getBytes(StandardCharsets.UTF_8) : null;
                             }
                         })
-                        .setValueSerializationSchema(new org.apache.flink.api.common.serialization.SerializationSchema<Tuple2<String, String>>() {
+                        .setValueSerializationSchema(new org.apache.flink.api.common.serialization.SerializationSchema<Tuple2<String, ProcessedSensorEvent>>() {
                             @Override
-                            public byte[] serialize(Tuple2<String, String> element) {
-                                return element.f1 != null ? element.f1.getBytes(StandardCharsets.UTF_8) : null;
+                            public byte[] serialize(Tuple2<String, ProcessedSensorEvent> element) {
+                                try {
+                                    return element.f1 != null ? avroSerializer.serialize(element.f1) : null;
+                                } catch (Exception e) {
+                                    throw new RuntimeException("Failed to serialize ProcessedSensorEvent", e);
+                                }
                             }
                         })
                         .build()

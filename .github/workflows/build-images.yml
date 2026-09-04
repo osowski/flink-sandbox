@@ -32,7 +32,10 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          RAW_TAG=$(git describe --tags --match 'flink-autoscaler-v*' --abbrev=0)
+          if ! RAW_TAG=$(git describe --tags --match 'flink-autoscaler-v*' --abbrev=0 2>&1); then
+            echo "::error::No flink-autoscaler-v* tag reachable from this checkout ($RAW_TAG) — cannot resolve a version for image tags. Ensure the flink-autoscaler-v1.0.0 tag (or a later one) exists and this checkout has full tag history."
+            exit 1
+          fi
           REPO_VERSION=${RAW_TAG#flink-autoscaler-}
           echo "Resolved repo_version=$REPO_VERSION (from tag $RAW_TAG)"
           echo "repo_version=$REPO_VERSION" >> "$GITHUB_OUTPUT"
@@ -125,8 +128,8 @@ jobs:
           tags: |
             quay.io/osowski/flink-kafka-demo:${{ steps.tag.outputs.version_tag }}
             quay.io/osowski/flink-kafka-demo:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=flink-image
+          cache-to: type=gha,mode=max,scope=flink-image
 
       - name: Verify pushed manifest is multi-arch
         if: github.event_name != 'pull_request'
@@ -168,8 +171,8 @@ jobs:
           tags: |
             quay.io/osowski/kafka-producer:${{ steps.tag.outputs.version_tag }}
             quay.io/osowski/kafka-producer:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=producer-image
+          cache-to: type=gha,mode=max,scope=producer-image
 
       - name: Verify pushed manifest is multi-arch
         if: github.event_name != 'pull_request'

@@ -1,0 +1,71 @@
+name: Build and Push Container Images
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      flink_platforms: ${{ steps.check.outputs.flink_platforms }}
+      flink_changed: ${{ steps.filter.outputs.flink }}
+      producer_changed: ${{ steps.filter.outputs.producer }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            flink:
+              - 'flink-autoscaler/flink-java-app/**'
+              - 'flink-autoscaler/schemas/**'
+              - '.github/workflows/build-images.yml'
+            producer:
+              - 'flink-autoscaler/python-producer/**'
+              - 'flink-autoscaler/schemas/**'
+              - '.github/workflows/build-images.yml'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Inspect confluentinc/cp-flink base image platforms
+        id: check
+        run: |
+          set -euo pipefail
+          RAW=$(docker buildx imagetools inspect confluentinc/cp-flink:2.2.0-cp2-java11 --format '{{json .Manifest.Manifests}}')
+          PLATFORMS=$(echo "$RAW" | jq -r '[.[].platform | select(.os=="linux") | .architecture] | unique | join(",")')
+          echo "Detected base image platforms: $PLATFORMS"
+
+          WANT="amd64
+          arm64"
+          HAVE=$(echo "$PLATFORMS" | tr ',' '\n' | sort -u)
+          RESOLVED=$(comm -12 <(echo "$WANT" | sort -u) <(echo "$HAVE") | paste -sd, -)
+
+          if [ -z "$RESOLVED" ]; then
+            echo "::error::cp-flink base image has neither amd64 nor arm64 in its manifest ($PLATFORMS) — cannot build."
+            exit 1
+          fi
+
+          if [ "$(echo "$RESOLVED" | tr ',' '\n' | sort -u | tr '\n' ',')" != "$(echo "$WANT" | sort -u | tr '\n' ',')" ]; then
+            echo "::warning::cp-flink base image is missing an expected platform (have: $PLATFORMS, want: amd64,arm64) — falling back to linux/$RESOLVED. See osowski/flink-sandbox#6."
+          fi
+
+          FLINK_PLATFORMS=$(echo "$RESOLVED" | sed 's#^#linux/#; s#,#,linux/#g')
+          echo "Resolved flink_platforms=$FLINK_PLATFORMS"
+          echo "flink_platforms=$FLINK_PLATFORMS" >> "$GITHUB_OUTPUT"

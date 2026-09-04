@@ -95,88 +95,81 @@ spec:
       resourceType: Subject
 ```
 
+## Image Versioning
+
+Both container images share one version number, independent of the
+underlying Flink/Confluent Platform release: published tags look like
+`v1.0.0-202609041200` (`<repo-version>-<UTC build timestamp>`), plus a
+floating `:latest`. `<repo-version>` comes from the most recent
+`flink-autoscaler-v*` git tag — bump it by pushing a new tag
+(`git tag flink-autoscaler-v1.1.0 && git push-external origin flink-autoscaler-v1.1.0`)
+when either app changes in a way worth marking, not on every build.
+
+To see exactly which dependency versions are baked into a given tag,
+check out that tag's commit and read the two files that pin them —
+they're the single source of truth, so a table here would just go stale:
+
+- **`flink-kafka-demo`**: `flink-autoscaler/flink-java-app/pom.xml`
+  (`flink.version`, `confluent.version`, `avro.version`,
+  `flink-connector-kafka`, `kafka-clients`) and the base image in
+  `flink-autoscaler/flink-java-app/Dockerfile`
+- **`kafka-producer`**: `flink-autoscaler/python-producer/requirements.txt`
+  (`confluent-kafka`, `fastavro`) and the Python version in
+  `flink-autoscaler/python-producer/Dockerfile.producer`
+
+As of `v1.0.0`: Flink 2.2.0 / Confluent Schema Registry client 8.2.0 /
+Avro 1.12.1 / `flink-connector-kafka` 5.0.0-2.2 / `kafka-clients` 4.2.0 /
+base image `confluentinc/cp-flink:2.2.0-cp2-java11` (flink-kafka-demo);
+`confluent-kafka[avro,schema-registry]>=2.3.0` / `fastavro>=1.9.0` /
+Python 3.11-slim (kafka-producer).
+
 ## Quick Start
 
-### 1. Build the Flink Java Application
+### 1. Container Images
 
-Navigate to the Flink application directory and build the JAR. This now
-also runs Avro code generation (`avro-maven-plugin`) against the schemas
-in `../schemas/`, producing `SensorEvent`/`ProcessedSensorEvent` Java
-classes before compiling:
+Pick one path — don't mix them:
+
+**Shipping a real image (recommended):** CI builds and pushes both
+multi-arch images automatically; see [Image Versioning](#image-versioning)
+above. Cut a release by pushing a tag:
 
 ```bash
+git tag flink-autoscaler-v1.1.0
+git push-external origin flink-autoscaler-v1.1.0
+```
+
+Then point `image:` in `flink-application-autoscale.yaml` and
+`python-producer/producer-deployment.yaml` at the published
+`quay.io/osowski/flink-kafka-demo:<version_tag>` /
+`quay.io/osowski/kafka-producer:<version_tag>` tags, with
+`imagePullPolicy: Always` or `IfNotPresent`. Find the exact
+`<version_tag>` in the
+[run](https://github.com/osowski/flink-sandbox/actions/workflows/flink-autoscaler-build-images.yml)
+your tag push triggered. No manual `docker build`/`tag`/`push` needed for
+this path.
+
+**Local dev loop (fast iteration, nothing pushed anywhere):**
+
+```bash
+# Flink app: build the JAR (also runs Avro code generation against
+# ../schemas/, producing SensorEvent/ProcessedSensorEvent classes), then
+# the image
 cd flink-java-app
 mvn clean package
-cd ..
-```
-
-This creates `target/kafka-flink-job-1.0-SNAPSHOT.jar`.
-
-### 2. Build the Flink Container Image
-
-Build the Flink application container image:
-
-```bash
-cd flink-java-app
 docker build -t flink-kafka-demo:latest .
 cd ..
-```
-
-**Option A: Push to Container Registry**
-
-```bash
-# Tag for your registry
-docker tag flink-kafka-demo:latest <your-registry>/flink-kafka-demo:latest
-
-# Push to registry
-docker push <your-registry>/flink-kafka-demo:latest
-```
-
-Update `flink-application-autoscale.yaml`:
-- Change `image:` to `<your-registry>/flink-kafka-demo:latest`
-- Change `imagePullPolicy:` to `Always` or `IfNotPresent`
-
-**Option B: Load into kind (for local clusters)**
-
-```bash
 kind load docker-image flink-kafka-demo:latest
-```
 
-Keep `imagePullPolicy: Never` in the YAML.
-
-### 3. Build the Python Producer Container Image
-
-The producer's Dockerfile now needs the shared `schemas/` directory in its
-build context, so build it from `flink-autoscaler/` (not from inside
-`python-producer/`):
-
-```bash
+# Python producer — build context must be flink-autoscaler/ (not
+# python-producer/), since the Dockerfile needs the shared schemas/ dir
 docker build -f python-producer/Dockerfile.producer -t kafka-producer:latest .
-```
-
-**Option A: Push to Container Registry**
-
-```bash
-# Tag for your registry
-docker tag kafka-producer:latest <your-registry>/kafka-producer:latest
-
-# Push to registry
-docker push <your-registry>/kafka-producer:latest
-```
-
-Update `python-producer/producer-deployment.yaml`:
-- Change `image:` to `<your-registry>/kafka-producer:latest`
-- Change `imagePullPolicy:` to `Always` or `IfNotPresent`
-
-**Option B: Load into kind (for local clusters)**
-
-```bash
 kind load docker-image kafka-producer:latest
 ```
 
-Keep `imagePullPolicy: Never` in the YAML.
+Keep `imagePullPolicy: Never` in both deployment YAMLs when using
+locally-built images.
 
-### 4. Create Kafka Topics
+### 2. Create Kafka Topics
 
 Create the input and output topics:
 
@@ -194,7 +187,7 @@ You should see:
 - `autoscale-demo` (21 partitions)
 - `autoscale-demo-out` (21 partitions)
 
-### 5. Deploy the Flink Application
+### 3. Deploy the Flink Application
 
 Deploy the Flink application with autoscaling enabled:
 
@@ -215,7 +208,7 @@ Check Flink pods:
 kubectl get pods -n flink -l app=flink-kafka-demo
 ```
 
-### 6. Deploy the Kafka Producer
+### 4. Deploy the Kafka Producer
 
 Start the producer to generate load:
 

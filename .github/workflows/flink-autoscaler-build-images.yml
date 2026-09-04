@@ -1,0 +1,199 @@
+name: Build and Push Container Images
+
+on:
+  push:
+    branches: [main]
+    tags: ['flink-autoscaler-v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      flink_platforms: ${{ steps.check.outputs.flink_platforms }}
+      flink_changed: ${{ steps.filter.outputs.flink }}
+      producer_changed: ${{ steps.filter.outputs.producer }}
+      repo_version: ${{ steps.version.outputs.repo_version }}
+      version_tag: ${{ steps.version.outputs.version_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve shared repo version
+        id: version
+        run: |
+          set -euo pipefail
+          if ! RAW_TAG=$(git describe --tags --match 'flink-autoscaler-v*' --abbrev=0 2>&1); then
+            echo "::error::No flink-autoscaler-v* tag reachable from this checkout ($RAW_TAG) — cannot resolve a version for image tags. Ensure the flink-autoscaler-v1.0.0 tag (or a later one) exists and this checkout has full tag history."
+            exit 1
+          fi
+          REPO_VERSION=${RAW_TAG#flink-autoscaler-}
+          VERSION_TAG="${REPO_VERSION}-$(date -u +%Y%m%d%H%M)"
+          echo "Resolved repo_version=$REPO_VERSION (from tag $RAW_TAG)"
+          echo "Resolved version_tag=$VERSION_TAG"
+          echo "repo_version=$REPO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            flink:
+              - 'flink-autoscaler/flink-java-app/**'
+              - 'flink-autoscaler/schemas/**'
+              - '.github/workflows/flink-autoscaler-build-images.yml'
+            producer:
+              - 'flink-autoscaler/python-producer/**'
+              - 'flink-autoscaler/schemas/**'
+              - '.github/workflows/flink-autoscaler-build-images.yml'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Inspect confluentinc/cp-flink base image platforms
+        id: check
+        run: |
+          set -euo pipefail
+          RAW=$(docker buildx imagetools inspect confluentinc/cp-flink:2.2.0-cp2-java11 --format '{{json .Manifest.Manifests}}')
+          PLATFORMS=$(echo "$RAW" | jq -r '[.[].platform | select(.os=="linux") | .architecture] | unique | join(",")')
+          echo "Detected base image platforms: $PLATFORMS"
+
+          WANT="amd64
+          arm64"
+          HAVE=$(echo "$PLATFORMS" | tr ',' '\n' | sort -u)
+          RESOLVED=$(comm -12 <(echo "$WANT" | sort -u) <(echo "$HAVE") | paste -sd, -)
+
+          if [ -z "$RESOLVED" ]; then
+            echo "::error::cp-flink base image has neither amd64 nor arm64 in its manifest ($PLATFORMS) — cannot build."
+            exit 1
+          fi
+
+          if [ "$(echo "$RESOLVED" | tr ',' '\n' | sort -u | tr '\n' ',')" != "$(echo "$WANT" | sort -u | tr '\n' ',')" ]; then
+            echo "::warning::cp-flink base image is missing an expected platform (have: $PLATFORMS, want: amd64,arm64) — falling back to linux/$RESOLVED. See osowski/flink-sandbox#6."
+          fi
+
+          FLINK_PLATFORMS=$(echo "$RESOLVED" | sed 's#^#linux/#; s#,#,linux/#g')
+          echo "Resolved flink_platforms=$FLINK_PLATFORMS"
+          echo "flink_platforms=$FLINK_PLATFORMS" >> "$GITHUB_OUTPUT"
+
+  flink-image:
+    needs: preflight
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/flink-autoscaler-v') ||
+      needs.preflight.outputs.flink_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: maven
+
+      - name: Build architecture-neutral JAR
+        working-directory: flink-autoscaler/flink-java-app
+        run: mvn -B clean package
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: flink-autoscaler/flink-java-app
+          platforms: ${{ needs.preflight.outputs.flink_platforms }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            quay.io/osowski/flink-kafka-demo:${{ needs.preflight.outputs.version_tag }}
+            quay.io/osowski/flink-kafka-demo:latest
+          cache-from: type=gha,scope=flink-image
+          cache-to: type=gha,mode=max,scope=flink-image
+
+      - name: Verify pushed manifest is multi-arch
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          WANT="${{ needs.preflight.outputs.flink_platforms }}"
+          TAG="quay.io/osowski/flink-kafka-demo:${{ needs.preflight.outputs.version_tag }}"
+          RAW=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest.Manifests}}')
+          HAVE=$(echo "$RAW" | jq -r '[.[].platform | select(.os=="linux") | "linux/" + .architecture] | unique | join(",")')
+          echo "Pushed manifest platforms: $HAVE"
+          MISSING=$(comm -23 <(echo "$WANT" | tr ',' '\n' | sort -u) <(echo "$HAVE" | tr ',' '\n' | sort -u))
+          if [ -n "$MISSING" ]; then
+            echo "::error::Published manifest for $TAG is missing platform(s): $(echo "$MISSING" | tr '\n' ' ') (wanted: $WANT, have: $HAVE)"
+            exit 1
+          fi
+          echo "Verified: all wanted platforms ($WANT) present in $TAG"
+
+  producer-image:
+    needs: preflight
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/flink-autoscaler-v') ||
+      needs.preflight.outputs.producer_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: flink-autoscaler
+          file: flink-autoscaler/python-producer/Dockerfile.producer
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            quay.io/osowski/kafka-producer:${{ needs.preflight.outputs.version_tag }}
+            quay.io/osowski/kafka-producer:latest
+          cache-from: type=gha,scope=producer-image
+          cache-to: type=gha,mode=max,scope=producer-image
+
+      - name: Verify pushed manifest is multi-arch
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          WANT="linux/amd64,linux/arm64"
+          TAG="quay.io/osowski/kafka-producer:${{ needs.preflight.outputs.version_tag }}"
+          RAW=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest.Manifests}}')
+          HAVE=$(echo "$RAW" | jq -r '[.[].platform | select(.os=="linux") | "linux/" + .architecture] | unique | join(",")')
+          echo "Pushed manifest platforms: $HAVE"
+          MISSING=$(comm -23 <(echo "$WANT" | tr ',' '\n' | sort -u) <(echo "$HAVE" | tr ',' '\n' | sort -u))
+          if [ -n "$MISSING" ]; then
+            echo "::error::Published manifest for $TAG is missing platform(s): $(echo "$MISSING" | tr '\n' ' ') (wanted: $WANT, have: $HAVE)"
+            exit 1
+          fi
+          echo "Verified: all wanted platforms ($WANT) present in $TAG"

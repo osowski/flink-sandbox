@@ -2,11 +2,25 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install confluent-kafka library
-RUN pip install --no-cache-dir confluent-kafka==2.3.0
+# Build context is flink-autoscaler/ (the parent directory of this file),
+# so every COPY path below is relative to that, not to python-producer/.
+# This lets the image pull the canonical schemas/ directory directly
+# instead of keeping a duplicate copy under python-producer/.
+
+# Install Python dependencies. confluent-kafka[avro,schema-registry] ships
+# prebuilt manylinux wheels for both x86_64 and aarch64, so no compiler
+# toolchain should be needed on either architecture — if a future version
+# ever lacks a wheel for one, add back:
+#   apt-get update && apt-get install -y --no-install-recommends gcc g++ librdkafka-dev
+# before this COPY, matching the pattern the pre-Avro image used.
+COPY python-producer/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the canonical Avro schemas shared with flink-java-app
+COPY schemas/ schemas/
 
 # Copy the producer script
-COPY producer.py .
+COPY python-producer/producer.py .
 
 # Run the producer
 CMD ["python", "-u", "producer.py"]

@@ -2,12 +2,8 @@
 
 This demo showcases Apache Flink's autoscaling capabilities using Confluent Platform for Apache Flink on Kubernetes. It demonstrates how Flink automatically scales task parallelism based on workload using a Kafka producer/consumer pattern.
 
-> [!TIP]
-> This application has several versions based upon needs.
-> - `v0.1.0` - barebones application with no Authn/Authz expectations and uses JSON-based messages
-> - `v0.2.0` - enhanced application with support for OAuth Authentication and use AVRO-based messages
-> 
-> You can use either depending upon cluster needs.
+> [!NOTE]
+> **History:** this project originally shipped plain JSON messages. A migration to Avro with Confluent Schema Registry was designed and built, but sat unmerged for a time — during which this README incorrectly described a `v0.2.0` release as already being Avro-based. As of this version, the project is **Avro-only**: there is no JSON code path, and no dual-mode configuration to choose between. The JSON version is retired; it's mentioned here only as history, not as a supported option.
 
 ## Prerequisites
 
@@ -16,6 +12,7 @@ Before starting, ensure you have:
 - Kubernetes cluster (e.g., kind, minikube, or cloud-based)
 - **Confluent for Kubernetes** operator installed
 - **Confluent Platform for Apache Flink** operator installed
+- **Confluent Schema Registry**, reachable from both the Flink job and the Python producer — this is a hard requirement now, not optional, since every message is Avro-encoded against it
 - Required REST class resources created:
   - `CMFRestClass` (Confluent Metadata Framework REST class)
   - `KafkaRestClass`
@@ -35,16 +32,77 @@ This demo assumes the following namespace configuration:
 
 This demo consists of:
 
-1. **Flink Java Application**: Consumes from `autoscale-demo` topic, processes data, and writes to `autoscale-demo-out` topic
-2. **Python Kafka Producer**: Generates test data to the `autoscale-demo` topic
+1. **Flink Java Application**: Consumes Avro-encoded `SensorEvent` messages from the `autoscale-demo` topic, processes data with CPU-intensive transformations, and writes Avro-encoded `ProcessedSensorEvent` messages to the `autoscale-demo-out` topic
+2. **Python Kafka Producer**: Generates sensor event data, serialized as Avro via Schema Registry, to the `autoscale-demo` topic
 3. **Kafka Topics**: Input and output topics with 21 partitions each
-4. **Autoscaler Configuration**: Aggressive autoscaling settings optimized for demo visibility
+4. **Schema Registry**: Manages the `SensorEvent`/`ProcessedSensorEvent` Avro schemas — see [Avro Schema Information](#avro-schema-information) below
+5. **Autoscaler Configuration**: Aggressive autoscaling settings optimized for demo visibility
+
+### Data Flow
+
+```
+Python Producer → Kafka Topic (Avro) → Flink Application → Kafka Topic (Avro)
+       ↓                                        ↓
+  Schema Registry                     Schema Registry
+```
+
+## Avro Schema Information
+
+Full schema definitions, subject naming, and compatibility rules live in
+[`schemas/README.md`](schemas/README.md) — that directory is the single
+source of truth both `flink-java-app` and `python-producer` build against
+directly. In short:
+
+- **Input** (`SensorEvent`): `timestamp`, `type`, `location`, `value`, `status`, `id` — all required.
+- **Output** (`ProcessedSensorEvent`): the same six fields, plus nullable `encoded` (success case), `error`, and `original` (failure case — the Flink job emits one of these two shapes for every record it processes, rather than dropping records it can't transform).
+- **Subjects**: `<topic-name>-value`, derived automatically from whatever topic name is configured — this demo's defaults are `autoscale-demo-value` and `autoscale-demo-out-value`.
+- **Compatibility**: `BACKWARD` — safe to add new nullable fields with defaults (as `error`/`original` were), unsafe to change a field's type or remove a required field.
+
+### Schema Registry OAuth (optional)
+
+If your Schema Registry requires OAuth bearer-token authentication, add
+these keys to `flinkConfiguration` (Flink job) and the corresponding env
+vars (Python producer), the same way Kafka OAuth is configured below:
+
+```yaml
+flinkConfiguration:
+  schema.registry.url: "http://schemaregistry.kafka.svc.cluster.local:8081"
+  schema.registry.bearer.auth.credentials.source: "OAUTHBEARER"
+  schema.registry.bearer.auth.issuer.endpoint.url: "http://keycloak.keycloak.svc.cluster.local:8080/realms/confluent/protocol/openid-connect/token"
+  schema.registry.bearer.auth.client.id: "sa-flink-app"
+  schema.registry.bearer.auth.client.secret: "sa-flink-app-secret"
+  schema.registry.bearer.auth.scope: ""
+  schema.registry.bearer.auth.logical.cluster: ""
+  schema.registry.bearer.auth.identity.pool.id: ""
+```
+
+The service account needs `ResourceOwner` on the relevant Schema Registry
+subjects, e.g.:
+
+```yaml
+apiVersion: platform.confluent.io/v1beta1
+kind: ConfluentRolebinding
+spec:
+  principal:
+    type: user
+    name: sa-flink-app
+  role: ResourceOwner
+  clustersScopeByIds:
+    schemaRegistryClusterId: id_schemaregistry_kafka
+  resourcePatterns:
+    - patternType: PREFIXED
+      name: autoscale-demo
+      resourceType: Subject
+```
 
 ## Quick Start
 
 ### 1. Build the Flink Java Application
 
-Navigate to the Flink application directory and build the JAR:
+Navigate to the Flink application directory and build the JAR. This now
+also runs Avro code generation (`avro-maven-plugin`) against the schemas
+in `../schemas/`, producing `SensorEvent`/`ProcessedSensorEvent` Java
+classes before compiling:
 
 ```bash
 cd flink-java-app
@@ -88,12 +146,12 @@ Keep `imagePullPolicy: Never` in the YAML.
 
 ### 3. Build the Python Producer Container Image
 
-Build the Kafka producer image:
+The producer's Dockerfile now needs the shared `schemas/` directory in its
+build context, so build it from `flink-autoscaler/` (not from inside
+`python-producer/`):
 
 ```bash
-cd python-producer
-docker build -t kafka-producer:latest -f Dockerfile.producer .
-cd ..
+docker build -f python-producer/Dockerfile.producer -t kafka-producer:latest .
 ```
 
 **Option A: Push to Container Registry**
@@ -236,6 +294,9 @@ spec:
     kafka.output.topic: autoscale-demo-out
     kafka.consumer.group.id: flink-consumer-group-beta
 
+    # Schema Registry connection
+    schema.registry.url: http://schemaregistry.kafka.svc.cluster.local:8081
+
     # Kafka security (OAuth example)
     kafka.security.protocol: SASL_PLAINTEXT
     kafka.sasl.mechanism: OAUTHBEARER
@@ -251,7 +312,8 @@ spec:
 **How it works:**
 - All properties prefixed with `kafka.` are automatically extracted by the application
 - The `kafka.` prefix is removed and properties are passed to Kafka connectors
-- This enables OAuth, SASL, SSL, and other Kafka client configurations
+- All properties prefixed with `schema.registry.` are extracted the same way and passed to the Avro deserializer/serializer
+- This enables OAuth, SASL, SSL, and other Kafka/Schema-Registry client configurations
 - Environment variables in JAAS config (e.g., `${env:KAFKA_OAUTH_CLIENT_ID}`) are resolved at runtime
 
 #### Offset Management
@@ -294,7 +356,7 @@ kubectl apply -f flink-application-autoscale.yaml
 
 #### Method 2: Environment Variables (Legacy)
 
-Set via `podTemplate` in the FlinkApplication spec. This method is maintained for backward compatibility but doesn't support Kafka security configuration.
+Set via `podTemplate` in the FlinkApplication spec. This method is maintained for backward compatibility but doesn't support Kafka/Schema-Registry security configuration.
 
 ```yaml
 podTemplate:
@@ -310,6 +372,8 @@ podTemplate:
             value: autoscale-demo-out
           - name: KAFKA_CONSUMER_GROUP
             value: flink-consumer-group-beta
+          - name: SCHEMA_REGISTRY_URL
+            value: http://schemaregistry.kafka.svc.cluster.local:8081
 ```
 
 **Note:** When both Flink configuration properties and environment variables are set, Flink configuration takes precedence.
@@ -320,6 +384,7 @@ Set in `producer-deployment.yaml`:
 
 - `KAFKA_BROKERS`: `kafka:9092`
 - `KAFKA_TOPIC`: `autoscale-demo`
+- `SCHEMA_REGISTRY_URL`: `http://schemaregistry.kafka.svc.cluster.local:8081`
 - `PYTHONUNBUFFERED`: `1`
 
 ## Cleanup
@@ -355,6 +420,15 @@ Check producer logs:
 kubectl logs -l app=kafka-producer -n kafka
 ```
 
+### Schema Registry / Avro Errors
+
+If the Flink job or producer logs show schema or registry errors:
+
+1. Confirm `SCHEMA_REGISTRY_URL` (or `schema.registry.url`) actually resolves and is reachable from inside the cluster
+2. If Schema Registry requires OAuth, confirm the `schema.registry.bearer.auth.*` properties/env vars are set — see [Schema Registry OAuth](#schema-registry-oauth-optional)
+3. Confirm the service account has `ResourceOwner` on the relevant subject (`<topic>-value`)
+4. A message written without the Confluent wire-format prefix (magic byte + 4-byte schema ID) — e.g. from a stray non-Avro producer — will make every consumer of that topic fail permanently on that offset; if this happens, purge and re-create the topic
+
 ### No Autoscaling Observed
 
 1. Verify autoscaler is enabled in FlinkApplication spec
@@ -381,3 +455,5 @@ kubectl get kafka -n kafka
 - [Confluent Platform for Apache Flink Documentation](https://docs.confluent.io/platform/current/flink/index.html)
 - [Apache Flink Autoscaling](https://nightlies.apache.org/flink/flink-docs-master/docs/deployment/elastic_scaling/)
 - [Confluent for Kubernetes](https://docs.confluent.io/operator/current/overview.html)
+- [Apache Avro Specification](https://avro.apache.org/docs/current/spec.html)
+- [Confluent Schema Registry](https://docs.confluent.io/platform/current/schema-registry/index.html)

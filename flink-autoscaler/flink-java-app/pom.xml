@@ -38,6 +38,17 @@
             <version>4.2.0</version>
         </dependency>
 
+        <!-- kafka-clients' OAUTHBEARER support (org.apache.kafka.common.security.oauthbearer.internals.secured.*)
+             references org.jose4j.keys.resolvers.VerificationKeyResolver, but Kafka's
+             published POM does not declare jose4j as a dependency - consumers must add it
+             themselves or hit NoClassDefFoundError at runtime. Pinned to the version Kafka
+             4.2.0 itself is built/tested against. -->
+        <dependency>
+            <groupId>org.bitbucket.b_c</groupId>
+            <artifactId>jose4j</artifactId>
+            <version>0.9.6</version>
+        </dependency>
+
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-connector-base</artifactId>

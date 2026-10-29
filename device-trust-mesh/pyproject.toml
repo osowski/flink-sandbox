@@ -1,0 +1,16 @@
+[project]
+name = "device-trust-mesh"
+version = "0.0.0"
+description = "Agentic Device Trust Mesh: Kafka, Flink and A2A agents on KubeRay"
+requires-python = ">=3.11"
+dependencies = [
+    "ray[serve]",
+    "confluent-kafka[avro,schemaregistry,json]",
+    "mcp",
+    "a2a-sdk",
+    "httpx",
+    "prometheus-client",
+]
+
+[tool.setuptools.packages.find]
+include = ["dtm*"]

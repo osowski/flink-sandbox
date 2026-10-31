@@ -178,6 +178,11 @@ class LoadTests(TempRoot):
             with self.subTest(ref=ref), self.assertRaises(ConfigError):
                 self.load_with(agents={"risk": {"enabled": True, "replicas": 1, "promptRef": ref}})
 
+    def test_non_string_prompt_ref_raises(self):
+        for ref in (1, ["risk.v1"], {"name": "risk.v1"}, True):
+            with self.subTest(ref=ref), self.assertRaisesRegex(ConfigError, "agents.risk.promptRef must be a string"):
+                self.load_with(agents={"risk": {"enabled": True, "replicas": 1, "promptRef": ref}})
+
     def test_prompt_ref_cannot_leave_prompts_dir(self):
         (self.root / "secret").write_text("x")
         with self.assertRaises(ConfigError):
@@ -303,6 +308,17 @@ class RefreshTests(TempRoot):
         self.edit_agents(agents={"risk": {"enabled": True, "replicas": 1, "promptRef": "nope.v1"}})
         with self.assertLogs("dtm.common.config", logging.ERROR):
             self.assertIsNone(s.refresh())
+
+    def test_refresh_keeps_last_good_on_a_non_string_prompt_ref(self):
+        s = self.src()
+        good = s.load()
+        self.edit_agents(agents={"risk": {"enabled": True, "replicas": 1, "promptRef": 1}})
+        with self.assertLogs("dtm.common.config", logging.ERROR) as logs:
+            self.assertIsNone(s.refresh())
+        self.assertIn("promptRef", logs.output[0])
+        (self.root / "agents.yaml").write_text((FIXTURE / "agents.yaml").read_text())
+        self.assertIsNone(s.refresh())
+        self.assertEqual(s.load().digest, good.digest)
 
     def test_bad_read_is_not_recorded_as_seen(self):
         s = self.src()

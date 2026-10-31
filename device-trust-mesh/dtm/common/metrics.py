@@ -19,3 +19,10 @@ LOOP_ERRORS = Counter(
     "Exceptions that escaped a poll-loop iteration; the loop backs off and continues.",
     ["agent"],
 )
+
+LLM_LATENCY_MS = Histogram(
+    "dtm_llm_latency_ms",
+    "Milliseconds spent in one LLM completion call, by agent, model and outcome status.",
+    ["agent", "model", "status"],
+    buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000),
+)

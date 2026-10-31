@@ -6,7 +6,7 @@ import uuid
 
 from dtm.common.envelope import Envelope
 from dtm.common.kafka import bootstrap_servers, producer_config, schema_registry_url
-from dtm.simulator.engine import SCENARIOS
+from dtm.simulator.engine import MAX_INJECT_COUNT, SCENARIOS
 
 CONTROL_TOPIC = "simulator.control"
 NO_SCENARIO_KEY = "control"
@@ -43,8 +43,8 @@ def _non_negative_rate(text: str) -> float:
 
 def _positive_count(text: str) -> int:
     count = int(text)
-    if count < 1:
-        raise argparse.ArgumentTypeError("count must be at least 1")
+    if not 1 <= count <= MAX_INJECT_COUNT:
+        raise argparse.ArgumentTypeError(f"count must be between 1 and {MAX_INJECT_COUNT}")
     return count
 
 

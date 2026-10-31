@@ -6,6 +6,9 @@ import threading
 import time
 from collections.abc import Mapping
 
+from confluent_kafka import KafkaException
+from confluent_kafka.serialization import MessageField, SerializationContext, SerializationError
+
 from dtm.common.kafka import bootstrap_servers, consumer_config, producer_config, schema_registry_url
 from dtm.simulator.engine import DEFAULT_RATE, Simulator
 from dtm.simulator.pool import DevicePool
@@ -26,6 +29,24 @@ def _setting(env: Mapping[str, str], name: str) -> str | None:
     return value if value else None
 
 
+def _publish(producer, serializer, event: dict, on_delivery) -> bool:
+    """Serialize and produce one device event; log and skip it if that fails. Return whether it was queued."""
+    device_id = event["envelope"]["device_id"]
+    try:
+        value = serializer(event, SerializationContext(DEVICE_EVENTS_TOPIC, MessageField.VALUE))
+        try:
+            producer.produce(DEVICE_EVENTS_TOPIC, key=device_id.encode("utf-8"), value=value,
+                             on_delivery=on_delivery)
+        except BufferError:
+            producer.poll(_POLL_TIMEOUT_S)
+            producer.produce(DEVICE_EVENTS_TOPIC, key=device_id.encode("utf-8"), value=value,
+                             on_delivery=on_delivery)
+    except (SerializationError, BufferError, KafkaException):
+        log.exception("skipping %s event for %s", event.get("event_type"), device_id)
+        return False
+    return True
+
+
 def run(env: Mapping[str, str]) -> None:
     """Run the simulator until SIGINT or SIGTERM.
 
@@ -34,7 +55,6 @@ def run(env: Mapping[str, str]) -> None:
     from confluent_kafka import Consumer, Producer
     from confluent_kafka.schema_registry import SchemaRegistryClient
     from confluent_kafka.schema_registry.avro import AvroDeserializer, AvroSerializer
-    from confluent_kafka.serialization import MessageField, SerializationContext
 
     cap = _setting(env, "DEVICE_CAP")
     if cap is None:
@@ -89,10 +109,7 @@ def run(env: Mapping[str, str]) -> None:
             consume(policy, lambda cmd: simulator.on_policy_command(cmd, now_ms()))
             consume(control, simulator.on_control)
             for event in simulator.tick(now_ms()):
-                producer.produce(DEVICE_EVENTS_TOPIC, key=event["envelope"]["device_id"].encode("utf-8"),
-                                 value=serializer(event, SerializationContext(DEVICE_EVENTS_TOPIC,
-                                                                              MessageField.VALUE)),
-                                 on_delivery=on_delivery)
+                _publish(producer, serializer, event, on_delivery)
             producer.poll(0)
     finally:
         producer.flush(_FLUSH_TIMEOUT_S)

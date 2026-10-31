@@ -46,6 +46,12 @@ class CliTest(unittest.TestCase):
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
             parse(["inject", "NOPE"])
 
+    def test_count_is_bounded(self):
+        for bad in ("0", "1001"):
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                parse(["inject", "CLEAN", "--count", bad])
+        self.assertEqual(parse(["inject", "CLEAN", "--count", "1000"])[3], 1000)
+
     def test_main_produces_keyed_by_scenario(self):
         with mock.patch.object(ctl, "_send") as send:
             self.assertEqual(ctl.main(["inject", "IMPOSSIBLE_TRAVEL", "--count", "2"]), 0)

@@ -7,7 +7,7 @@ import fastavro
 import fastavro.validation
 
 from dtm.common.schemas import load_avro_schema
-from dtm.simulator.engine import DEFAULT_MIX, DEFAULT_RATE, SCENARIOS, Simulator
+from dtm.simulator.engine import DEFAULT_MIX, DEFAULT_RATE, MAX_INJECT_COUNT, SCENARIOS, Simulator
 from dtm.simulator.pool import DevicePool
 
 T0 = 1793323937770
@@ -332,8 +332,112 @@ class ScenarioTest(unittest.TestCase):
         self.assertTrue(s.tick(T0 + 70_000))
 
 
+class FixRoundTest(unittest.TestCase):
+    def test_pool_of_read_only_devices_is_unenrolled(self):
+        s = sim(cap=3, rate=5)
+        for i in (1, 2, 3):
+            s.on_policy_command(cmd(None, "READ_ONLY", device_id=f"dev-000{i}"), T0)
+        evs = [e for t in range(1000, 60_000, 1000) for e in s.tick(T0 + t)]
+        self.assertTrue(evs)
+        self.assertEqual({e["event_type"] for e in evs[:3]}, {"UNENROL_REQUESTED"})
+
+    def test_unresolved_challenged_device_is_reenrolled_after_the_timeout_only(self):
+        s = sim(cap=1, rate=1, pending_timeout_ms=60_000)
+        enrol = first(s.tick(T0 + 1000))
+        with self.assertLogs("dtm.simulator.engine", "WARNING"):
+            s.on_policy_command(cmd(enrol, "CHALLENGE"), T0 + 2000)
+        self.assertEqual([e for t in range(3000, 61_000, 1000) for e in s.tick(T0 + t)], [])
+        again = first(s.tick(T0 + 62_000))
+        self.assertEqual(again["event_type"], "ENROL_REQUESTED")
+
+    def test_resolved_challenged_device_is_not_reenrolled(self):
+        s = sim(cap=1, rate=1, pending_timeout_ms=60_000)
+        enrol = first(s.tick(T0 + 1000))
+        with self.assertLogs("dtm.simulator.engine", "WARNING"):
+            s.on_policy_command(cmd(enrol, "CHALLENGE"), T0 + 2000)
+        s.on_policy_command(cmd(enrol, "ALLOW"), T0 + 3000)
+        evs = [e for t in range(4000, 60_000, 1000) for e in s.tick(T0 + t)]
+        self.assertNotIn("ENROL_REQUESTED", [e["event_type"] for e in evs])
+
+    def test_inject_count_is_clamped(self):
+        s = sim(cap=20, rate=1)
+        with self.assertLogs("dtm.simulator.engine", "WARNING"):
+            s.on_control(ctrl("INJECT", "COMPROMISED_OS", count=MAX_INJECT_COUNT + 500))
+        self.assertEqual(len(s._injected), MAX_INJECT_COUNT)
+
+    def test_repeated_impossible_travel_does_not_reuse_the_last_country(self):
+        s = sim(cap=3)
+        first(s.tick(T0 + 5000))
+        s.on_control(ctrl("INJECT", "IMPOSSIBLE_TRAVEL", count=2))
+        one = first(s.tick(T0 + 10_000))
+        two = first(s.tick(T0 + 15_000))
+        self.assertEqual(one["geo"]["country"], "AU")
+        self.assertNotEqual(two["geo"]["country"], "AU")
+        self.assertEqual(two["envelope"]["customer_id"], one["envelope"]["customer_id"])
+
+    def test_unenrol_reuses_the_enrolled_fingerprint(self):
+        s = sim(cap=1, rate=1)
+        s.on_control(ctrl("INJECT", "OUTDATED_OS"))
+        enrol = first(s.tick(T0 + 1000))
+        s.on_policy_command(cmd(enrol, "ALLOW"), T0 + 1100)
+        unenrol = first(s.tick(T0 + 2100))
+        self.assertEqual(unenrol["event_type"], "UNENROL_REQUESTED")
+        self.assertEqual(unenrol["fingerprint"], enrol["fingerprint"])
+        self.assertIn(unenrol["fingerprint"]["os_version"], ("15.7", "11"))
+
+    def test_idle_tokens_log_once_per_transition(self):
+        s = sim(cap=1, rate=1)
+        enrol = first(s.tick(T0 + 1000))
+        with self.assertLogs("dtm.simulator.engine", "INFO") as logs:
+            for t in range(2000, 10_000, 1000):
+                s.tick(T0 + t)
+        self.assertEqual(len([r for r in logs.records if "no device" in r.getMessage()]), 1)
+        s.tick(T0 + 10_000)
+        s.on_policy_command(cmd(enrol, "ALLOW"), T0 + 10_100)
+        first(s.tick(T0 + 11_000))        # unenrol emitted: the idle state ends
+        with self.assertLogs("dtm.simulator.engine", "INFO") as logs:
+            for t in range(12_000, 20_000, 1000):
+                s.tick(T0 + t)
+        self.assertEqual(len([r for r in logs.records if "no device" in r.getMessage()]), 1)
+
+
 class RunnerImportTest(unittest.TestCase):
     def test_runner_imports_and_requires_device_cap(self):
         from dtm.simulator import runner
         with self.assertRaises(ValueError):
             runner.run({})
+
+    def test_publish_skips_events_that_fail_to_serialize_or_queue(self):
+        from confluent_kafka import KafkaException
+        from confluent_kafka.serialization import SerializationError
+        from dtm.simulator.runner import _publish
+        event = first(sim(cap=1, rate=1).tick(T0 + 1000))
+
+        class Producer:
+            def __init__(self, errors):
+                self.errors, self.sent, self.polls = list(errors), [], 0
+
+            def produce(self, topic, key, value, on_delivery):
+                if self.errors:
+                    raise self.errors.pop(0)
+                self.sent.append((topic, key, value))
+
+            def poll(self, timeout):
+                self.polls += 1
+
+        def serialize(_event, _ctx):
+            return b"v"
+
+        def broken(_event, _ctx):
+            raise SerializationError("no schema")
+
+        ok = Producer([])
+        self.assertTrue(_publish(ok, serialize, event, None))
+        self.assertEqual(ok.sent, [("device.events", event["envelope"]["device_id"].encode(), b"v")])
+        retried = Producer([BufferError()])
+        self.assertTrue(_publish(retried, serialize, event, None))
+        self.assertEqual((len(retried.sent), retried.polls), (1, 1))
+        with self.assertLogs("dtm.simulator.runner", "ERROR"):
+            self.assertFalse(_publish(Producer([BufferError(), BufferError()]), serialize, event, None))
+            self.assertFalse(_publish(Producer([KafkaException("boom")]), serialize, event, None))
+            self.assertFalse(_publish(Producer([]), broken, event, None))

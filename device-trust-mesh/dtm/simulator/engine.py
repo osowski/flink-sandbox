@@ -31,8 +31,11 @@ NEW, PENDING, TRUSTED, READ_ONLY = "NEW", "PENDING", "TRUSTED", "READ_ONLY"
 CHALLENGED, BLOCKED, UNENROLLED = "CHALLENGED", "BLOCKED", "UNENROLLED"
 
 _ENROLLABLE = (NEW, UNENROLLED, BLOCKED)
+_UNENROLLABLE = (TRUSTED, READ_ONLY)
+_AWAITING_RESOLUTION = (PENDING, CHALLENGED)
 _ACTION_STATUS = {"ALLOW": TRUSTED, "READ_ONLY": READ_ONLY, "CHALLENGE": CHALLENGED}
 _FAR_COUNTRY, _FAR_COUNTRY_FROM_FAR = "AU", "GB"
+MAX_INJECT_COUNT = 1000
 _ESTABLISHED_ACCOUNT_DAYS = 90
 _RECENT_EVENT_MS = 10 * 60_000
 _DEDUPE_CAPACITY = 10_000
@@ -43,7 +46,7 @@ _TOKEN_EPSILON = 1e-9
 @dataclass
 class _DeviceState:
     status: str = NEW
-    pending_since_ms: int = 0
+    awaiting_since_ms: int = 0
     fp: dict | None = None
     country: str | None = None
 
@@ -62,7 +65,7 @@ class _ChallengeAnswer:
 class _Plan:
     device: Device
     event_type: str
-    kind: str
+    fp: dict
     country: str
 
 
@@ -89,6 +92,7 @@ class Simulator:
         self._seen: set[str] = set()
         self._seen_order: deque[str] = deque()
         self._tokens = 0.0
+        self._idle = False
         self._last_tick_ms: int | None = None
 
     def status(self, device_id: str) -> str:
@@ -102,7 +106,10 @@ class Simulator:
             self._tokens -= 1
             scenario = self._injected.popleft() if self._injected else self._draw_from_mix()
             event = self._emit(scenario, now_ms)
-            if event is not None:
+            if event is None:
+                self._note_idle()
+            else:
+                self._idle = False
                 events.append(event)
         return events
 
@@ -126,7 +133,8 @@ class Simulator:
             return
         self._remember(message_id)
         state.status = status
-        if action == "CHALLENGE":
+        if status == CHALLENGED:
+            state.awaiting_since_ms = now_ms
             self._schedule_answer(cmd, now_ms)
 
     def on_control(self, ctrl: dict) -> None:
@@ -149,14 +157,22 @@ class Simulator:
             if scenario not in SCENARIOS:
                 log.warning("INJECT of unknown scenario %r ignored", scenario)
                 return
-            count = ctrl.get("count")
-            self._injected.extend([scenario] * max(1 if count is None else count, 0))
+            count = 1 if ctrl.get("count") is None else max(ctrl["count"], 0)
+            if count > MAX_INJECT_COUNT:
+                log.warning("INJECT count %s clamped to %s", count, MAX_INJECT_COUNT)
+                count = MAX_INJECT_COUNT
+            self._injected.extend([scenario] * count)
 
     def _refill(self, now_ms: int) -> None:
         if self._last_tick_ms is not None and self.running:
             elapsed_s = max(now_ms - self._last_tick_ms, 0) / 1000
             self._tokens = min(self._tokens + self._rate * elapsed_s, max(_MIN_BUCKET, self._rate))
         self._last_tick_ms = now_ms if self._last_tick_ms is None else max(self._last_tick_ms, now_ms)
+
+    def _note_idle(self) -> None:
+        if not self._idle:
+            log.info("no device can be enrolled or unenrolled; paced tokens are skipped until one can")
+        self._idle = True
 
     def _draw_from_mix(self) -> str:
         return self._rng.choices(list(DEFAULT_MIX), weights=list(DEFAULT_MIX.values()))[0]
@@ -209,11 +225,11 @@ class Simulator:
             return None
         state = self._state[plan.device.device_id]
         state.status = PENDING
-        state.pending_since_ms = now_ms
-        state.fp = fingerprint(plan.device.platform, plan.kind)
+        state.awaiting_since_ms = now_ms
+        state.fp = plan.fp
         state.country = plan.country
         return self._event(plan.device, plan.event_type, now_ms, correlation_id=str(uuid.uuid4()),
-                           fp=state.fp, country=plan.country)
+                           fp=plan.fp, country=plan.country)
 
     def _plan(self, scenario: str, now_ms: int) -> _Plan | None:
         if scenario == "UNENROL":
@@ -236,27 +252,30 @@ class Simulator:
             if not recent:
                 return None
             device = self._rng.choice(recent)
-            far = _FAR_COUNTRY_FROM_FAR if device.home_country == _FAR_COUNTRY else _FAR_COUNTRY
-            return _Plan(device, "ENROL_REQUESTED", "CLEAN", far)
+            last_country = self._last_event[device.customer_id][1]
+            far = _FAR_COUNTRY_FROM_FAR if last_country == _FAR_COUNTRY else _FAR_COUNTRY
+            return _Plan(device, "ENROL_REQUESTED", fingerprint(device.platform, "CLEAN"), far)
         else:
             raise ValueError(f"unknown scenario {scenario!r}")
         return self._enrol_plan(self._rng.choice(candidates), kind) if candidates else None
 
     def _enrol_plan(self, device: Device, kind: str) -> _Plan:
-        return _Plan(device, "ENROL_REQUESTED", kind, device.home_country)
+        return _Plan(device, "ENROL_REQUESTED", fingerprint(device.platform, kind), device.home_country)
 
     def _unenrol_plan(self) -> _Plan | None:
-        trusted = [d for d in self.pool.devices if self._state[d.device_id].status == TRUSTED]
-        if not trusted:
+        enrolled = [d for d in self.pool.devices if self._state[d.device_id].status in _UNENROLLABLE]
+        if not enrolled:
             return None
-        device = self._rng.choice(trusted)
-        return _Plan(device, "UNENROL_REQUESTED", "CLEAN", device.home_country)
+        device = self._rng.choice(enrolled)
+        fp = self._state[device.device_id].fp or fingerprint(device.platform, "CLEAN")
+        return _Plan(device, "UNENROL_REQUESTED", fp, device.home_country)
 
     def _enrollable(self, now_ms: int) -> list[Device]:
         def eligible(state: _DeviceState) -> bool:
             if state.status in _ENROLLABLE:
                 return True
-            return state.status == PENDING and now_ms - state.pending_since_ms >= self._pending_timeout_ms
+            return (state.status in _AWAITING_RESOLUTION
+                    and now_ms - state.awaiting_since_ms >= self._pending_timeout_ms)
 
         return [d for d in self.pool.devices if eligible(self._state[d.device_id])]
 

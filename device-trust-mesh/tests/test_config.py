@@ -221,10 +221,42 @@ class RefreshTests(TempRoot):
         (self.root / "agents.yaml").write_text("llm: [unclosed")
         with self.assertLogs("dtm.common.config", logging.ERROR):
             self.assertIsNone(s.refresh())
-        with self.assertLogs("dtm.common.config", logging.ERROR):
-            self.assertIsNone(s.refresh())
+        self.assertIsNone(s.refresh())
         (self.root / "agents.yaml").write_text(good_yaml + "# touched\n")
         self.assertIsNotNone(s.refresh())
+
+    def test_a_rejected_config_is_logged_once_until_it_changes(self):
+        s = self.src()
+        s.load()
+        (self.root / "agents.yaml").write_text("llm: [unclosed")
+        with self.assertLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
+        with self.assertNoLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
+            self.assertIsNone(s.refresh())
+        (self.root / "agents.yaml").write_text("llm: [still unclosed")
+        with self.assertLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
+
+    def test_the_same_bad_config_is_logged_again_after_a_good_one(self):
+        s = self.src()
+        s.load()
+        good_yaml = (self.root / "agents.yaml").read_text()
+        for _ in range(2):
+            (self.root / "agents.yaml").write_text("llm: [unclosed")
+            with self.assertLogs("dtm.common.config", logging.ERROR):
+                self.assertIsNone(s.refresh())
+            (self.root / "agents.yaml").write_text(good_yaml)
+            self.assertIsNone(s.refresh())
+
+    def test_an_unreadable_config_is_logged_once_per_error(self):
+        s = self.src()
+        s.load()
+        (self.root / "agents.yaml").unlink()
+        with self.assertLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
+        with self.assertNoLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
 
     def test_refresh_keeps_last_good_on_unversionable_values(self):
         for name, text in UNVERSIONABLE.items():

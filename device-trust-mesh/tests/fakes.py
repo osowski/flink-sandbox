@@ -97,6 +97,8 @@ class FakeConsumer:
         self.committed_errors: dict[tuple[str, int], str] = {}
         self.committed = CommitLog(self.committed_offsets, self.committed_errors)
         self.commit_error = None
+        self.commit_raises: Exception | None = None
+        self.seek_raises: Exception | None = None
         self.closed = False
         self.time_offsets: dict[tuple[str, int, int], int] = {}
         self.time_errors: dict[tuple[str, int], str] = {}
@@ -139,6 +141,8 @@ class FakeConsumer:
                 for p in partitions]
 
     def commit(self, offsets=None, asynchronous=True):
+        if self.commit_raises is not None:
+            raise self.commit_raises
         results = []
         for tp in offsets or []:
             results.append(_tp(tp.topic, tp.partition, tp.offset, self.commit_error))
@@ -153,6 +157,8 @@ class FakeConsumer:
         self.paused = []
 
     def seek(self, partition):
+        if self.seek_raises is not None:
+            raise self.seek_raises
         self.seeks.append((partition.topic, partition.partition, partition.offset))
 
     def get_watermark_offsets(self, partition, timeout=None, cached=False):

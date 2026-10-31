@@ -1,20 +1,30 @@
 """AgentRuntime: the poll loop around an agent's handler, with hot reload and the Agent Card lifecycle.
 
 Configuration is re-read before every message, so a handler always sees the settings current at its
-message. A disabled agent has no card on ``agent.cards`` and its consumer is paused; records fetched
-before the pause and not yet handled are rewound so the paused consumer delivers them again after
-re-enabling.
+message. A disabled agent, or one removed from ``agents.yaml``, has no card on ``agent.cards`` and its
+consumer is paused; records fetched before the pause and not yet handled are rewound so the paused
+consumer delivers them again after re-enabling.
+
+Card writes are confirmed as soon as they are made. An unconfirmed card operation is retried at the
+start of every ``step`` and never reaches a message commit. Of the bus settings only ``policyCommands``
+is applied on reload; a config that changes any other bus setting is refused and the agent keeps its
+previous settings.
 """
 import logging
 import threading
 from collections.abc import Callable
 
+from confluent_kafka import KafkaException
+
 from dtm.common.a2a import agent_card, task_topic
 from dtm.common.bus import AgentBus, CommitFailed, DeliveryFailed, Inbound
 from dtm.common.config import AgentSettings, ConfigError, FileConfigSource
-from dtm.common.metrics import HANDLER_ERRORS
+from dtm.common.metrics import HANDLER_ERRORS, LOOP_ERRORS
 
 log = logging.getLogger(__name__)
+
+_CARD_DELIVERY_TIMEOUT_S = 10.0
+_LOOP_BACKOFF_S = 1.0
 
 
 class AgentRuntime:
@@ -28,9 +38,12 @@ class AgentRuntime:
         self._describe = describe
         self._bootstrap = bootstrap
         self._settings: AgentSettings | None = None
+        self._active = False
+        self._card_confirmed = True
 
     @property
-    def settings(self) -> AgentSettings:
+    def settings(self) -> AgentSettings | None:
+        """The settings in force, or None before ``start``."""
         return self._settings
 
     def start(self) -> None:
@@ -38,14 +51,16 @@ class AgentRuntime:
         if self.name not in config.agents:
             raise ConfigError(f"agent {self.name!r} is not configured")
         self._settings = config.agents[self.name]
+        self._active = self._settings.enabled
         self.bus.subscribe([task_topic(self.name)])
-        if self._settings.enabled:
-            self._publish_card()
-        else:
-            self._withdraw()
+        self._sync_card()
+        if not self._active:
+            self.bus.pause()
 
     def step(self, timeout: float = 0.1) -> int:
         """Process one poll batch and return how many messages were handled and committed."""
+        if not self._card_confirmed:
+            self._sync_card()
         batch = self.bus.poll(timeout)
         if not batch:
             self._reload()
@@ -53,7 +68,7 @@ class AgentRuntime:
         handled = 0
         for i, inbound in enumerate(batch):
             self._reload()
-            if not self._settings.enabled:
+            if not self._active:
                 self._rewind(batch[i:])
                 break
             self._handle(inbound)
@@ -69,7 +84,12 @@ class AgentRuntime:
 
     def run(self, stop: threading.Event) -> None:
         while not stop.is_set():
-            self.step()
+            try:
+                self.step()
+            except Exception:
+                LOOP_ERRORS.labels(self.name).inc()
+                log.exception("%s: poll loop iteration failed, retrying in %ss", self.name, _LOOP_BACKOFF_S)
+                stop.wait(_LOOP_BACKOFF_S)
 
     def _handle(self, inbound: Inbound) -> None:
         try:
@@ -85,30 +105,50 @@ class AgentRuntime:
         for inbound in unhandled:
             first.setdefault((inbound.topic, inbound.partition), inbound)
         for inbound in first.values():
-            self.bus.rewind(inbound)
+            try:
+                self.bus.rewind(inbound)
+            except KafkaException as e:
+                log.warning("%s: cannot rewind %s[%s]@%s, the partition is no longer assigned: %s",
+                            self.name, inbound.topic, inbound.partition, inbound.offset, e)
 
     def _reload(self) -> None:
         config = self._config_source.refresh()
         if config is None:
             return
+        if config.bus != self.bus.config:
+            try:
+                self.bus.reconfigure(config.bus)
+            except ValueError as e:
+                log.error("%s: config reload refused, keeping previous settings: %s", self.name, e)
+                return
         new = config.agents.get(self.name)
         if new is None:
-            log.warning("%s: agent absent from reloaded config, keeping current settings", self.name)
-            return
-        old, self._settings = self._settings, new
-        if old.enabled and not new.enabled:
-            self._withdraw()
-        elif new.enabled and not old.enabled:
-            self._publish_card()
+            log.warning("%s: agent absent from reloaded config, treating it as disabled", self.name)
+        was_active, old = self._active, self._settings
+        self._active = new is not None and new.enabled
+        if new is not None:
+            self._settings = new
+        if was_active and not self._active:
+            self._sync_card()
+            self.bus.pause()
+        elif self._active and not was_active:
+            self._sync_card()
             self.bus.resume()
-        elif new.enabled and new.config_version != old.config_version:
-            self._publish_card()
+        elif self._active and new.config_version != old.config_version:
+            self._sync_card()
 
-    def _publish_card(self) -> None:
-        description, skills = self._describe(self._settings)
-        self.bus.publish_card(agent_card(self.name, description, skills, self._settings.config_version,
-                                         self._bootstrap))
-
-    def _withdraw(self) -> None:
-        self.bus.tombstone_card(self.name)
-        self.bus.pause()
+    def _sync_card(self) -> None:
+        """Make the card topic reflect the agent's state: the current card when active, a tombstone otherwise."""
+        try:
+            if self._active:
+                description, skills = self._describe(self._settings)
+                self.bus.publish_card(agent_card(self.name, description, skills, self._settings.config_version,
+                                                 self._bootstrap))
+            else:
+                self.bus.tombstone_card(self.name)
+            self.bus.ensure_delivered(_CARD_DELIVERY_TIMEOUT_S)
+        except DeliveryFailed as e:
+            self._card_confirmed = False
+            log.error("%s: agent card not delivered, retrying on the next step: %s", self.name, e)
+        else:
+            self._card_confirmed = True

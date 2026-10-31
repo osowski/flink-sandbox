@@ -117,27 +117,35 @@ class FileConfigSource:
         self._root = Path(root)
         self._env = env
         self._digest: str | None = None
+        self._rejected: str | None = None
 
     def load(self) -> MeshConfig:
         config = self._build(self._snapshot())
         self._digest = config.digest
+        self._rejected = None
         return config
 
     def refresh(self) -> MeshConfig | None:
         """Return a new config when the files' content changed and is valid; otherwise None.
 
-        An unreadable or invalid change is logged and leaves the caller on its last good config. Its
-        digest is not remembered, so the next valid write is picked up.
+        An unreadable or invalid change is logged once per distinct bad content and leaves the caller on
+        its last good config. Its digest is not remembered as seen, so the next valid write is picked up.
         """
+        snapshot = None
         try:
             snapshot = self._snapshot()
             if snapshot.digest == self._digest:
+                self._rejected = None
                 return None
             config = self._build(snapshot)
         except ConfigError as e:
-            log.error("config reload rejected, keeping last good config: %s", e)
+            rejected = snapshot.digest if snapshot is not None else str(e)
+            if rejected != self._rejected:
+                self._rejected = rejected
+                log.error("config reload rejected, keeping last good config: %s", e)
             return None
         self._digest = config.digest
+        self._rejected = None
         return config
 
     @staticmethod

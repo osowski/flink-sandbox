@@ -13,3 +13,9 @@ HANDLER_ERRORS = Counter(
     "Messages whose handler raised; the message is committed and the agent reports the failure itself.",
     ["agent"],
 )
+
+LOOP_ERRORS = Counter(
+    "dtm_loop_errors_total",
+    "Exceptions that escaped a poll-loop iteration; the loop backs off and continues.",
+    ["agent"],
+)

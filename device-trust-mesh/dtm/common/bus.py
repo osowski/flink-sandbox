@@ -8,9 +8,9 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from confluent_kafka import OFFSET_BEGINNING, OFFSET_END, TopicPartition
+from confluent_kafka import OFFSET_BEGINNING, OFFSET_END, KafkaException, TopicPartition
 
 from dtm.common.a2a import CARDS_TOPIC, REPLY_TOPIC, dumps, task_topic, validate
 from dtm.common.envelope import ENVELOPE_URI
@@ -309,17 +309,34 @@ class AgentBus:
         re-process the same inbound (or stop) before committing anything later. Raises ``CommitFailed``
         if the broker rejects the offset commit.
         """
-        remaining = self._producer.flush(_FLUSH_TIMEOUT_S)
+        self.ensure_delivered(_FLUSH_TIMEOUT_S)
+        try:
+            results = self._consumer.commit(
+                offsets=[TopicPartition(inbound.topic, inbound.partition, inbound.offset + 1)],
+                asynchronous=False)
+        except KafkaException as e:
+            raise CommitFailed(f"commit failed for {inbound.topic}[{inbound.partition}]: {e}") from e
+        failed = [tp for tp in results or [] if tp.error]
+        if failed:
+            raise CommitFailed(f"commit rejected for {failed[0].topic}[{failed[0].partition}]: {failed[0].error}")
+
+    def ensure_delivered(self, timeout: float) -> None:
+        """Flush the producer and raise ``DeliveryFailed`` if any produced record was not acknowledged.
+
+        The collected delivery errors are cleared when raised, so a failure is reported once.
+        """
+        remaining = self._producer.flush(timeout)
         errors, self._delivery_errors = self._delivery_errors, []
         if errors:
             raise DeliveryFailed(f"{len(errors)} record(s) not delivered: {errors[0]}")
         if remaining:
-            raise DeliveryFailed(f"{remaining} record(s) still undelivered after {_FLUSH_TIMEOUT_S}s")
-        results = self._consumer.commit(
-            offsets=[TopicPartition(inbound.topic, inbound.partition, inbound.offset + 1)], asynchronous=False)
-        failed = [tp for tp in results or [] if tp.error]
-        if failed:
-            raise CommitFailed(f"commit rejected for {failed[0].topic}[{failed[0].partition}]: {failed[0].error}")
+            raise DeliveryFailed(f"{remaining} record(s) still undelivered after {timeout}s")
+
+    def reconfigure(self, config: BusConfig) -> None:
+        """Apply a new ``policyCommands`` mode in place; any other difference from the current config is refused."""
+        if replace(self.config, policy_commands=config.policy_commands) != config:
+            raise ValueError("only policyCommands can change while the bus is running; restart the agent for other bus settings")
+        self.config = config
 
     def rewind(self, inbound: Inbound) -> None:
         """Move the consumer back to ``inbound``'s offset so the record is delivered again."""

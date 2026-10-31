@@ -2,6 +2,8 @@ import threading
 import unittest
 from datetime import datetime, timezone
 
+from dtm.common.a2a import artifact_update, validate
+from dtm.common.envelope import Envelope
 from dtm.common.metrics import DEVICE_CAP_EXCEEDED, TRACKED_DEVICES
 from dtm.mesh.context.table import SIGNALS_PER_DEVICE, ContextTable
 
@@ -62,19 +64,42 @@ class ContextTableTest(unittest.TestCase):
 
     def test_as_of_is_camel_case_with_materialized_at_from_clock(self):
         t = ContextTable(20, clock=lambda: 1793448000.5)
-        self.assertEqual(t.as_of("dev-0001"),
-                         {"contextSeq": None, "materializedAt": 0, "sourceOffsets": []})
+        self.assertEqual(t.as_of("dev-0001"), {"materializedAt": 0, "sourceOffsets": []})
         put(t, "dev-0001", ctx(5), offset=3)
         self.assertEqual(t.as_of("dev-0001"), {
             "contextSeq": 5, "materializedAt": 1793448000500,
             "sourceOffsets": [{"topic": "device.context", "partition": 0, "offset": 3}]})
-        self.assertIsNone(t.as_of(None)["contextSeq"])
+        self.assertNotIn("contextSeq", t.as_of(None))
 
-    def test_null_context_seq_reads_as_none(self):
+    def test_null_context_seq_omits_context_seq(self):
         t = ContextTable(20)
         put(t, "dev-0001", ctx(None))
         r = t.get_device("dev-0001")
-        self.assertEqual((r["status"], r["as_of"]["contextSeq"]), ("OK", None))
+        self.assertEqual(r["status"], "OK")
+        self.assertNotIn("contextSeq", r["as_of"])
+
+    def test_stale_lookup_for_an_absent_device_omits_context_seq(self):
+        r = ContextTable(20).get_device("dev-0009", min_seq=1, wait_timeout_ms=10)
+        self.assertEqual(r["status"], "STALE")
+        self.assertNotIn("contextSeq", r["as_of"])
+
+    def test_as_of_never_carries_null(self):
+        t = ContextTable(20)
+        put(t, "dev-0001", ctx(None))
+        for r in (t.get_device("dev-0001"), t.get_device("dev-0009"), t.get_device("dev-0001", 1, 10)):
+            with self.subTest(status=r["status"]):
+                self.assertNotIn(None, r["as_of"].values())
+
+    def test_ok_sequenced_as_of_is_a_valid_risk_assessment_as_of(self):
+        t = ContextTable(20, clock=lambda: 1793448000.5)
+        put(t, "dev-0001", ctx(5), offset=3)
+        r = t.get_device("dev-0001", min_seq=5)
+        self.assertEqual(r["status"], "OK")
+        envelope = Envelope("m-2", "c-1", "m-1", "agent:risk", "dev", "abc123", EVENT_MS, "dev-0001",
+                            "cust-001", 5, 5)
+        assessment = {"score": 12, "rationale": "clean device", "signalIds": [], "asOf": r["as_of"]}
+        validate("agent.task-events", artifact_update("m-1", "t-1", "c-1", "a-1", "risk-assessment",
+                                                      assessment, "Risk 12", envelope))
 
     def test_source_offsets_sorted_per_topic_partition(self):
         t = ContextTable(20)

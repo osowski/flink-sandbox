@@ -3,7 +3,8 @@
 Each replica reads every partition of every context topic from the beginning with its own
 unique group id and never commits, so every replica holds the full context and a restart
 replays the topics. The materializer is ready once it has consumed everything that was
-already in the topics when it started.
+already in the topics when it started. Materialization lag is observed only once it is ready,
+so the startup replay does not record the ages of historical records.
 """
 import logging
 import threading
@@ -129,7 +130,7 @@ class Materializer:
             MATERIALIZER_SKIPPED.labels(topic).inc()
             log.warning("skipping record topic=%s partition=%s offset=%s: %s", topic, partition, offset, e)
             return False
-        if timestamp_type != confluent_kafka.TIMESTAMP_NOT_AVAILABLE:
+        if self.ready.is_set() and timestamp_type != confluent_kafka.TIMESTAMP_NOT_AVAILABLE:
             MATERIALIZATION_LAG_MS.labels(topic).observe(self._clock() * 1000 - timestamp_ms)
         return True
 

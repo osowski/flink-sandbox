@@ -38,7 +38,7 @@ uv venv -p 3.12 .venv && uv pip install -p .venv -e .
 
 `context-mcp` serves four MCP tools over streamable HTTP at `/context-mcp/mcp`:
 
-- `get_device_context(device_id, min_seq=None)`: with `min_seq` it waits up to `DTM_CONTEXT_WAIT_TIMEOUT_MS` (default 2000) for that context sequence, then answers `OK`, `STALE` or `NOT_FOUND`.
+- `get_device_context(device_id, min_seq=None)`: with `min_seq` it waits up to `DTM_CONTEXT_WAIT_TIMEOUT_MS` (default 2000) for that context sequence, then answers `OK`, `STALE` or `NOT_FOUND`. The result's `as_of` carries `materializedAt`, `sourceOffsets` and, only when the device has a context sequence, `contextSeq` (never null). Agents copy `as_of` into an artifact's `asOf` only from an `OK` result that has `contextSeq`.
 - `get_customer_context(customer_id)`
 - `list_risk_signals(device_id, limit=10)`
 - `list_devices(customer_id=None, trust_status=None)`

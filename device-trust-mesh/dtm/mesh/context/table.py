@@ -60,6 +60,7 @@ class ContextTable:
 
     def get_device(self, device_id: str, min_seq: int | None = None,
                    wait_timeout_ms: int = 2000) -> dict:
+        """Return ``status``, the ``device`` row (or None) and ``as_of`` (see ``as_of``)."""
         with self._cond:
             if min_seq is not None and wait_timeout_ms > 0:
                 self._cond.wait_for(lambda: self._satisfies(device_id, min_seq),
@@ -97,6 +98,11 @@ class ContextTable:
             return [dict(r) for r in rows if trust_status is None or r["trust_status"] == trust_status]
 
     def as_of(self, device_id: str | None) -> dict:
+        """Return what the table has materialized: ``materializedAt``, ``sourceOffsets`` and ``contextSeq``.
+
+        ``contextSeq`` is present only when the device has a context sequence; it is never null. An
+        agent copies ``as_of`` into an artifact's ``asOf`` only from an OK result that has ``contextSeq``.
+        """
         with self._cond:
             return self._as_of(device_id)
 
@@ -110,10 +116,12 @@ class ContextTable:
 
     def _as_of(self, device_id: str | None) -> dict:
         row = self._devices.get(device_id) if device_id is not None else None
-        return {"contextSeq": row["context_seq"] if row else None,
-                "materializedAt": self._materialized_at,
-                "sourceOffsets": [{"topic": t, "partition": p, "offset": o}
-                                  for (t, p), o in sorted(self._offsets.items())]}
+        as_of = {"materializedAt": self._materialized_at,
+                 "sourceOffsets": [{"topic": t, "partition": p, "offset": o}
+                                   for (t, p), o in sorted(self._offsets.items())]}
+        if row is not None and row["context_seq"] is not None:
+            as_of = {"contextSeq": row["context_seq"], **as_of}
+        return as_of
 
     def _apply_device(self, device_id: str, value: dict | None) -> None:
         row = None

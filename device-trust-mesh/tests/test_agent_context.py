@@ -1,10 +1,12 @@
 import asyncio
 import threading
+import time
 import unittest
 from unittest import mock
 
 from agent_fakes import context_table
 from dtm.common.context_client import ContextClient
+from dtm.mesh.agents import context as context_module
 from dtm.mesh.agents.context import SyncContext
 from dtm.mesh.context.server import build_mcp
 from mcp.client.client import Client
@@ -82,6 +84,103 @@ class SyncContextTest(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 quick.get_device_context("dev-0001")
             self.assertEqual(quick.get_device_context("dev-0001")["status"], "OK")
+
+    def test_call_queued_behind_a_stuck_lock_holder_times_out(self):
+        ctx = SyncContext(build_mcp(context_table(devices=DEVICES), wait_timeout_ms=50), timeout_s=0.3)
+        self.addCleanup(ctx.close)
+
+        async def hold():
+            async with ctx._session_lock:
+                await asyncio.sleep(10)
+
+        holder = asyncio.run_coroutine_threadsafe(hold(), ctx._loop)
+        self.addCleanup(holder.cancel)
+        while not ctx._session_lock.locked():
+            time.sleep(0.01)
+        started = time.monotonic()
+        with mock.patch.object(context_module, "_CALL_GRACE_S", 0.2), self.assertRaises(TimeoutError):
+            ctx.get_device_context("dev-0001")
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_session_teardown_that_never_finishes_does_not_hang_the_call(self):
+        original_aexit = Client.__aexit__
+
+        async def wedged(client, *exc_info):
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                pass
+            return await original_aexit(client, *exc_info)
+
+        async def failing(client, *args, **kwargs):
+            raise RuntimeError("transport down")
+
+        started = time.monotonic()
+        with mock.patch.object(context_module, "_DROP_TIMEOUT_S", 0.2), \
+                mock.patch.object(Client, "call_tool", failing), mock.patch.object(Client, "__aexit__", wedged):
+            with self.assertLogs(context_module.log, "WARNING") as logs, \
+                    self.assertRaisesRegex(RuntimeError, "transport down"):
+                self.ctx.get_device_context("dev-0001")
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertIn("did not close", logs.output[0])
+
+    def test_timeout_while_opening_leaves_no_session_and_the_next_call_succeeds(self):
+        original_aenter = Client.__aenter__
+
+        async def slow_open(client):
+            await asyncio.sleep(0.3)
+            return await original_aenter(client)
+
+        quick = SyncContext(build_mcp(context_table(devices=DEVICES), wait_timeout_ms=50), timeout_s=0.1)
+        self.addCleanup(quick.close)
+        with self.assertNoLogs(context_module.log), mock.patch.object(Client, "__aenter__", slow_open):
+            with self.assertRaises(TimeoutError):
+                quick.get_device_context("dev-0001")
+            time.sleep(0.5)
+        quick._timeout_s = 5.0
+        self.assertEqual(quick.get_device_context("dev-0001")["status"], "OK")
+
+    def test_calls_racing_close_all_return(self):
+        ctx = SyncContext(build_mcp(context_table(devices=DEVICES), wait_timeout_ms=50), timeout_s=2.0)
+        self.addCleanup(ctx.close)
+        outcomes = []
+
+        def worker():
+            for _ in range(200):
+                try:
+                    ctx.get_device_context("dev-0001")
+                    outcomes.append("ok")
+                except RuntimeError:
+                    outcomes.append("closed")
+                    return
+                except TimeoutError:
+                    outcomes.append("timeout")
+                    return
+
+        threads = [threading.Thread(target=worker, daemon=True) for _ in range(8)]
+        for t in threads:
+            t.start()
+        time.sleep(0.05)
+        ctx.close()
+        for t in threads:
+            t.join(10)
+        self.assertEqual([t for t in threads if t.is_alive()], [])
+        self.assertNotIn("timeout", outcomes)
+
+    def test_call_on_a_stopped_loop_fails_instead_of_hanging(self):
+        ctx = SyncContext(build_mcp(context_table(devices=DEVICES), wait_timeout_ms=50), timeout_s=0.3)
+        loop = ctx._loop
+        with mock.patch.object(loop, "close"):
+            loop.call_soon_threadsafe(loop.stop)
+            ctx._thread.join(5)
+        self.assertFalse(ctx._thread.is_alive())
+        started = time.monotonic()
+        with mock.patch.object(context_module, "_CALL_GRACE_S", 0.2), self.assertRaises(TimeoutError):
+            ctx.get_device_context("dev-0001")
+        self.assertLess(time.monotonic() - started, 3)
+        loop.run_until_complete(asyncio.sleep(0.01))
+        loop.close()
+        ctx._closed = True
 
     def test_close_is_idempotent(self):
         self.ctx.get_device_context("dev-0001")

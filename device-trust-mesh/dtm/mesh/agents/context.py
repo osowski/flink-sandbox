@@ -4,6 +4,10 @@ One asyncio loop runs on a daemon thread and holds one ``ContextClient`` session
 keeps its transport in task groups that must be entered and exited from one task, so a dedicated task owns
 the session from open to close; each call runs as its own task on the loop and uses that session. A call
 that raises, including one that times out, closes the session, and the next call opens a fresh one.
+
+Every wait is bounded: a call raises ``TimeoutError`` within ``timeout_s`` of getting the session, within a
+grace of that however long it queued behind another call or its session took to close, and a call made
+once ``close`` has begun raises ``RuntimeError``.
 """
 import asyncio
 import logging
@@ -17,6 +21,8 @@ from dtm.common.context_client import ContextClient
 log = logging.getLogger(__name__)
 
 _THREAD_JOIN_GRACE_S = 5.0
+_DROP_TIMEOUT_S = 1.0  # how long a session's owner task may take to close before it is cancelled
+_CALL_GRACE_S = 2.0  # how long past ``timeout_s`` a caller waits for its call, which covers closing the session
 
 
 class _Session:
@@ -36,7 +42,7 @@ class SyncContext:
         self._session: _Session | None = None
         self._session_lock = asyncio.Lock()
         self._closed = False
-        self._close_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="dtm-context-loop", daemon=True)
         self._thread.start()
 
@@ -51,12 +57,13 @@ class SyncContext:
 
     def close(self) -> None:
         """Close the session on its loop, stop the loop and join its thread; safe to call again."""
-        with self._close_lock:
+        with self._state_lock:
             if self._closed:
                 return
             self._closed = True
         try:
-            asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop).result(self._timeout_s)
+            asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop).result(
+                self._timeout_s + _CALL_GRACE_S)
         except Exception:
             log.exception("context session did not close cleanly")
         finally:
@@ -71,10 +78,19 @@ class SyncContext:
             self._loop.close()
 
     def _call(self, use: Callable[[ContextClient], Awaitable]):
-        if self._closed:
-            raise RuntimeError("SyncContext is closed")
-        future = asyncio.run_coroutine_threadsafe(self._with_session(use), self._loop)
-        return future.result()
+        # Submitting under the lock that ``close`` takes to set ``_closed`` puts every accepted call on the
+        # loop ahead of the shutdown, which then waits for it.
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("SyncContext is closed")
+            future = asyncio.run_coroutine_threadsafe(self._with_session(use), self._loop)
+        try:
+            return future.result(self._timeout_s + _CALL_GRACE_S)
+        except TimeoutError:
+            if future.done():
+                raise
+            future.cancel()
+            raise TimeoutError(f"context call did not finish within {self._timeout_s + _CALL_GRACE_S:g}s") from None
 
     async def _with_session(self, use: Callable[[ContextClient], Awaitable]):
         """Open the session if needed and run ``use`` on it within the timeout; any failure closes the session."""
@@ -94,7 +110,9 @@ class SyncContext:
         async def own() -> None:
             try:
                 async with ContextClient(self._target) as client:
-                    ready.set_result(client)
+                    # A caller that gave up while the session opened has already set ``stop``.
+                    if not ready.done():
+                        ready.set_result(client)
                     await stop.wait()
             except Exception as e:
                 if not ready.done():
@@ -119,7 +137,10 @@ class SyncContext:
         session, self._session = self._session, None
         if session is not None:
             session.stop.set()
-            await asyncio.gather(session.owner, return_exceptions=True)
+            await asyncio.wait({session.owner}, timeout=_DROP_TIMEOUT_S)
+            if not session.owner.done():
+                log.warning("context session did not close within %gs; cancelling it", _DROP_TIMEOUT_S)
+                session.owner.cancel()
 
     async def _shutdown(self) -> None:
         async with self._session_lock:

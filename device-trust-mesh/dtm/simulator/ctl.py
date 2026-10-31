@@ -6,7 +6,7 @@ import uuid
 
 from dtm.common.envelope import Envelope
 from dtm.common.kafka import bootstrap_servers, producer_config, schema_registry_url
-from dtm.simulator.engine import MAX_INJECT_COUNT, SCENARIOS
+from dtm.simulator.engine import MAX_INJECT_COUNT, SCENARIOS, rate_problem
 
 CONTROL_TOPIC = "simulator.control"
 NO_SCENARIO_KEY = "control"
@@ -34,10 +34,14 @@ def control_record(command: str | None, *, scenario: str | None = None, rate_per
             "rate_per_sec": rate_per_sec, "count": count}
 
 
-def _non_negative_rate(text: str) -> float:
-    rate = float(text)
-    if rate < 0:
-        raise argparse.ArgumentTypeError("rate must not be negative")
+def _rate(text: str) -> float:
+    try:
+        rate = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"rate must be a number, got {text!r}") from None
+    problem = rate_problem(rate)
+    if problem is not None:
+        raise argparse.ArgumentTypeError(problem)
     return rate
 
 
@@ -53,8 +57,8 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="verb", required=True)
     sub.add_parser("start", help="resume paced enrolments")
     sub.add_parser("stop", help="pause paced enrolments")
-    rate = sub.add_parser("rate", help="set enrolments per second (0 pauses emission)")
-    rate.add_argument("rate", type=_non_negative_rate)
+    rate = sub.add_parser("rate", help="set enrolments per second, 0 to 100 (0 pauses emission)")
+    rate.add_argument("rate", type=_rate)
     inject = sub.add_parser("inject", help="queue a scenario ahead of the paced mix")
     inject.add_argument("scenario", choices=SCENARIOS)
     inject.add_argument("--count", type=_positive_count, default=None)

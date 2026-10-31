@@ -46,6 +46,13 @@ class CliTest(unittest.TestCase):
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
             parse(["inject", "NOPE"])
 
+    def test_rate_must_be_finite_and_at_most_100_per_second(self):
+        for bad in ("nan", "inf", "-inf", "-1", "100.5", "1e9", "fast"):
+            with self.subTest(rate=bad), mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                parse(["rate", bad])
+        self.assertEqual(parse(["rate", "100"])[2], 100.0)
+        self.assertEqual(parse(["rate", "0"])[2], 0.0)
+
     def test_count_is_bounded(self):
         for bad in ("0", "1001"):
             with mock.patch("sys.stderr"), self.assertRaises(SystemExit):

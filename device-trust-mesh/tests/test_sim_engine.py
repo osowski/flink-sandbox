@@ -7,7 +7,8 @@ import fastavro
 import fastavro.validation
 
 from dtm.common.schemas import load_avro_schema
-from dtm.simulator.engine import DEFAULT_MIX, DEFAULT_RATE, MAX_INJECT_COUNT, SCENARIOS, Simulator
+from dtm.simulator.engine import (DEFAULT_MIX, DEFAULT_RATE, MAX_INJECT_COUNT, MAX_RATE_PER_SEC, SCENARIOS,
+                                  Simulator)
 from dtm.simulator.pool import DevicePool
 
 T0 = 1793323937770
@@ -101,6 +102,21 @@ class PacingTest(unittest.TestCase):
         s.on_control(ctrl("START", rate=0.0))
         self.assertTrue(s.running)
         self.assertEqual(s.tick(T0 + 60_000), [])
+
+    def test_non_finite_negative_or_excessive_rate_rejected_at_construction(self):
+        for bad in (float("nan"), float("inf"), float("-inf"), -1.0, MAX_RATE_PER_SEC + 0.5):
+            with self.subTest(rate=bad), self.assertRaises(ValueError):
+                Simulator(DevicePool(5), random.Random(0), rate_per_sec=bad)
+        Simulator(DevicePool(5), random.Random(0), rate_per_sec=MAX_RATE_PER_SEC)
+
+    def test_non_finite_or_excessive_control_rate_is_logged_and_ignored(self):
+        for bad in (float("nan"), float("inf"), MAX_RATE_PER_SEC * 10):
+            with self.subTest(rate=bad):
+                s = sim(cap=20, rate=1.0)
+                s.tick(T0)
+                with self.assertLogs("dtm.simulator.engine", "WARNING"):
+                    s.on_control(ctrl(None, rate=bad))
+                self.assertEqual(len(s.tick(T0 + 1000)), 1)
 
     def test_rate_control_changes_the_pace(self):
         s = sim(cap=20, rate=0.0)

@@ -5,6 +5,7 @@ randomness is the injected ``random.Random``. ``tick`` returns the device events
 the caller produces them.
 """
 import logging
+import math
 import random
 import uuid
 from collections import deque
@@ -17,6 +18,7 @@ from dtm.simulator.pool import Device, DevicePool
 log = logging.getLogger(__name__)
 
 DEFAULT_RATE = 0.2
+MAX_RATE_PER_SEC = 100.0
 DEFAULT_MIX = {
     "CLEAN": 0.7,
     "COMPROMISED_OS": 0.075,
@@ -69,12 +71,24 @@ class _Plan:
     country: str
 
 
+def rate_problem(rate) -> str | None:
+    """Return why ``rate`` is not a usable enrolments-per-second rate, or None when it is."""
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+        return f"rate must be a number, got {rate!r}"
+    if not math.isfinite(rate):
+        return f"rate must be finite, got {rate}"
+    if not 0 <= rate <= MAX_RATE_PER_SEC:
+        return f"rate must be between 0 and {MAX_RATE_PER_SEC:g} per second, got {rate}"
+    return None
+
+
 class Simulator:
     def __init__(self, pool: DevicePool, rng: random.Random, *, rate_per_sec: float = DEFAULT_RATE,
                  pass_probability: float = 0.8, challenge_delay_ms: int = 2000,
                  pending_timeout_ms: int = 120_000, version: str = "dev"):
-        if rate_per_sec < 0:
-            raise ValueError(f"rate_per_sec must not be negative, got {rate_per_sec}")
+        problem = rate_problem(rate_per_sec)
+        if problem is not None:
+            raise ValueError(problem)
         self.pool = pool
         self.running = True
         self._rng = rng
@@ -140,8 +154,9 @@ class Simulator:
     def on_control(self, ctrl: dict) -> None:
         rate = ctrl.get("rate_per_sec")
         if rate is not None:
-            if rate < 0:
-                log.warning("negative rate %s ignored", rate)
+            problem = rate_problem(rate)
+            if problem is not None:
+                log.warning("control rate ignored: %s", problem)
             else:
                 self._rate = rate
         command = ctrl.get("command")

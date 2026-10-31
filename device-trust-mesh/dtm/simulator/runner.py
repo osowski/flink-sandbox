@@ -10,7 +10,7 @@ from confluent_kafka import KafkaException
 from confluent_kafka.serialization import MessageField, SerializationContext, SerializationError
 
 from dtm.common.kafka import bootstrap_servers, consumer_config, producer_config, schema_registry_url
-from dtm.simulator.engine import DEFAULT_RATE, Simulator
+from dtm.simulator.engine import DEFAULT_RATE, Simulator, rate_problem
 from dtm.simulator.pool import DevicePool
 
 log = logging.getLogger(__name__)
@@ -47,23 +47,37 @@ def _publish(producer, serializer, event: dict, on_delivery) -> bool:
     return True
 
 
-def run(env: Mapping[str, str]) -> None:
-    """Run the simulator until SIGINT or SIGTERM.
+def _rate(env: Mapping[str, str]) -> float:
+    text = _setting(env, "SIM_RATE_PER_SEC")
+    if text is None:
+        return DEFAULT_RATE
+    try:
+        rate = float(text)
+    except ValueError:
+        raise ValueError(f"SIM_RATE_PER_SEC must be a number, got {text!r}") from None
+    problem = rate_problem(rate)
+    if problem is not None:
+        raise ValueError(f"SIM_RATE_PER_SEC: {problem}")
+    return rate
 
-    ``DEVICE_CAP`` is required. ``SIM_RATE_PER_SEC``, ``SIM_SEED`` and ``DTM_VERSION`` are optional.
-    """
+
+def simulator_from_env(env: Mapping[str, str]) -> Simulator:
+    """Build the engine from ``DEVICE_CAP`` (required), ``SIM_RATE_PER_SEC``, ``SIM_SEED`` and ``DTM_VERSION``."""
+    cap = _setting(env, "DEVICE_CAP")
+    if cap is None:
+        raise ValueError("DEVICE_CAP is required")
+    seed = _setting(env, "SIM_SEED")
+    return Simulator(DevicePool(int(cap)), random.Random(int(seed)) if seed else random.Random(),
+                     rate_per_sec=_rate(env), version=_setting(env, "DTM_VERSION") or "dev")
+
+
+def run(env: Mapping[str, str]) -> None:
+    """Run the simulator until SIGINT or SIGTERM; ``simulator_from_env`` reads the settings."""
     from confluent_kafka import Consumer, Producer
     from confluent_kafka.schema_registry import SchemaRegistryClient
     from confluent_kafka.schema_registry.avro import AvroDeserializer, AvroSerializer
 
-    cap = _setting(env, "DEVICE_CAP")
-    if cap is None:
-        raise ValueError("DEVICE_CAP is required")
-    rate = _setting(env, "SIM_RATE_PER_SEC")
-    seed = _setting(env, "SIM_SEED")
-    simulator = Simulator(DevicePool(int(cap)), random.Random(int(seed)) if seed else random.Random(),
-                          rate_per_sec=float(rate) if rate else DEFAULT_RATE,
-                          version=_setting(env, "DTM_VERSION") or "dev")
+    simulator = simulator_from_env(env)
 
     registry = SchemaRegistryClient({"url": schema_registry_url()})
     serializer = AvroSerializer(registry, schema_str=None,
@@ -103,7 +117,7 @@ def run(env: Mapping[str, str]) -> None:
     def now_ms() -> int:
         return time.time_ns() // 1_000_000
 
-    log.info("simulator started: cap=%s", cap)
+    log.info("simulator started: cap=%s", len(simulator.pool.devices))
     try:
         while not stop.is_set():
             consume(policy, lambda cmd: simulator.on_policy_command(cmd, now_ms()))

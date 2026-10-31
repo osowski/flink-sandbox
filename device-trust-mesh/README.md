@@ -31,7 +31,7 @@ An agent consumes its own `agent.tasks.<name>` topic and its card advertises tha
 | Variable | Default | Meaning |
 |---|---|---|
 | `DEVICE_CAP` | required | Size of the fixed device pool (1 to 500): `dev-0001`..., three devices per customer |
-| `SIM_RATE_PER_SEC` | `0.2` | Paced enrolments per second (about one every 5 s) |
+| `SIM_RATE_PER_SEC` | `0.2` | Paced enrolments per second (about one every 5 s), a finite number from 0 to 100 |
 | `SIM_SEED` | random | Seed for the scenario mix, device choice and challenge outcomes |
 | `DTM_VERSION` | `dev` | Written to each event's `agent_version` |
 | `KAFKA_BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL` | in-cluster addresses | Kafka and Schema Registry endpoints |
@@ -55,7 +55,7 @@ A scenario with no feasible device falls back to `CLEAN`.
 ```bash
 python -m dtm.simulator.ctl start
 python -m dtm.simulator.ctl stop
-python -m dtm.simulator.ctl rate 1.5                  # 0 pauses emission
+python -m dtm.simulator.ctl rate 1.5                  # 0 to 100; 0 pauses emission
 python -m dtm.simulator.ctl inject IMPOSSIBLE_TRAVEL  # queue one ahead of the mix
 python -m dtm.simulator.ctl inject OUTDATED_OS --count 3
 ```

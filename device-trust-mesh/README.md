@@ -24,6 +24,42 @@ Agents read business data (device and customer context, risk signals) **only** t
 
 An agent consumes its own `agent.tasks.<name>` topic and its card advertises that topic. An observer of `agent.task-events`, such as Compliance, passes `topics=["agent.task-events"]` and `request_topic=None` to `AgentRuntime`; its card lists no interfaces.
 
+## Simulator
+
+`python -m dtm.simulator` runs the device simulator. It produces `ENROL_REQUESTED` and `UNENROL_REQUESTED` events to `device.events`, keyed by `device_id`, and closes the loop: it consumes `device.policy-commands` and answers every `CHALLENGE` command (once, echoing the enrolment's `correlation_id` and `enrolment_task_id`) with `CHALLENGE_PASSED` or `CHALLENGE_FAILED` after 2 s. A `CHALLENGE` command without an `enrolment_task_id` is not answered, because the router drops such an answer. Presenter commands arrive on `simulator.control`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DEVICE_CAP` | required | Size of the fixed device pool (1 to 500): `dev-0001`..., three devices per customer |
+| `SIM_RATE_PER_SEC` | `0.2` | Paced enrolments per second (about one every 5 s), a finite number from 0 to 100 |
+| `SIM_SEED` | random | Seed for the scenario mix, device choice and challenge outcomes |
+| `DTM_VERSION` | `dev` | Written to each event's `agent_version` |
+| `KAFKA_BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL` | in-cluster addresses | Kafka and Schema Registry endpoints |
+
+Each paced token goes to the injected scenarios first, then to a draw from the mix: 70% `CLEAN` and 7.5% each of `COMPROMISED_OS`, `OUTDATED_OS`, `NEW_DEVICE_ESTABLISHED_ACCOUNT` and `IMPOSSIBLE_TRAVEL`. A device is chosen among those that are new, unenrolled or blocked (or pending for longer than 120 s); when none is left, the simulator unenrols a random trusted device.
+
+| Scenario | What it emits |
+|---|---|
+| `CLEAN` | Enrolment from a clean device in its home country |
+| `COMPROMISED_OS` | Enrolment from a rooted device |
+| `OUTDATED_OS` | Enrolment from a device with an OS below the Flink threshold |
+| `NEW_DEVICE_ESTABLISHED_ACCOUNT` | Enrolment of a new device on an account older than 90 days that already has a trusted device |
+| `IMPOSSIBLE_TRAVEL` | Enrolment from `AU` (`GB` for an `AU` home) for a customer with an event in the last 10 minutes |
+| `CHALLENGE` | Enrolment with an outdated OS, to drive the step-up challenge |
+| `UNENROL` | Unenrolment of a trusted device |
+
+A scenario with no feasible device falls back to `CLEAN`.
+
+`dtm-ctl` sends the control commands (`python -m dtm.simulator.ctl ...`; it needs the same Kafka and Schema Registry variables). Records are keyed by the scenario name, or `control` when there is none.
+
+```bash
+python -m dtm.simulator.ctl start
+python -m dtm.simulator.ctl stop
+python -m dtm.simulator.ctl rate 1.5                  # 0 to 100; 0 pauses emission
+python -m dtm.simulator.ctl inject IMPOSSIBLE_TRAVEL  # queue one ahead of the mix
+python -m dtm.simulator.ctl inject OUTDATED_OS --count 3
+```
+
 ## Images
 
 `quay.io/osowski/device-trust-mesh-simulator` and `quay.io/osowski/device-trust-mesh-ray` are built by the `device-trust-mesh-build-images.yml` workflow ([#30](https://github.com/osowski/flink-sandbox/issues/30)).

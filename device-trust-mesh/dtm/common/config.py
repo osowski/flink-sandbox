@@ -26,6 +26,8 @@ CONFIG_ROOT = "/etc/dtm"
 KNOWN_AGENTS = ("risk", "enrolment", "step-up", "compliance", "revocation")
 
 _PROVIDERS = ("ollama", "openai-compatible", "recorded")
+_TOP_LEVEL_KEYS = ("llm", "agents", "bus", "context")
+_AGENT_KEYS = ("enabled", "replicas", "promptRef", "llm")
 _MIN_REPLICAS = 1
 _MAX_REPLICAS = 6
 _VERSION_LENGTH = 12
@@ -45,6 +47,7 @@ class AgentSettings:
     prompt_text: str | None
     llm: dict
     config_version: str
+    context: dict
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,23 @@ def _validate_llm(llm: dict, what: str) -> None:
 
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _known_keys(block: dict, known: tuple[str, ...], what: str) -> None:
+    unknown = sorted(map(str, set(block) - set(known)))
+    if unknown:
+        raise ConfigError(f"unknown {what} keys: {', '.join(unknown)}; known: {', '.join(known)}")
+
+
+def _validate_context(context: dict) -> None:
+    """``mcpUrl`` is a required non-empty string; ``waitTimeoutMs``, when present, a positive integer."""
+    url = context.get("mcpUrl")
+    if not isinstance(url, str) or not url:
+        raise ConfigError(f"context.mcpUrl must be a non-empty string; got {url!r}")
+    if "waitTimeoutMs" in context:
+        wait = context["waitTimeoutMs"]
+        if not _is_int(wait) or wait <= 0:
+            raise ConfigError(f"context.waitTimeoutMs must be a positive integer; got {wait!r}")
 
 
 @dataclass(frozen=True)
@@ -178,11 +198,13 @@ class FileConfigSource:
         except yaml.YAMLError as e:
             raise ConfigError(f"agents.yaml is not valid YAML: {e}") from e
         doc = _interpolate(_mapping(doc, "agents.yaml"), self._env)
+        _known_keys(doc, _TOP_LEVEL_KEYS, "top-level")
 
         llm = _mapping(doc.get("llm"), "llm")
         _validate_llm(llm, "llm")
         bus_block = _mapping(doc.get("bus", {}), "bus")
-        context = _mapping(doc.get("context", {}), "context")
+        context = _mapping(doc.get("context"), "context")
+        _validate_context(context)
         try:
             bus = BusConfig.from_dict(bus_block)
         except (ValueError, TypeError) as e:
@@ -197,6 +219,7 @@ class FileConfigSource:
 
     def _agent(self, name: str, raw: dict, llm: dict, bus_block: dict, context: dict,
                snapshot: _Snapshot) -> AgentSettings:
+        _known_keys(raw, _AGENT_KEYS, f"agents.{name}")
         enabled = raw.get("enabled", True)
         replicas = raw.get("replicas", 1)
         if not isinstance(enabled, bool):
@@ -218,4 +241,5 @@ class FileConfigSource:
                 raise ConfigError(f"prompt {prompt_ref!r} is not valid UTF-8: {e}") from e
 
         version = self.config_version(raw, merged, bus_block, context, prompt_text)
-        return AgentSettings(name, enabled, replicas, prompt_ref, prompt_text, merged, version)
+        return AgentSettings(name, enabled, replicas, prompt_ref, prompt_text, merged, version,
+                             copy.deepcopy(context))

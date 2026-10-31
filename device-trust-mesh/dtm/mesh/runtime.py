@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 from confluent_kafka import KafkaException
 
-from dtm.common.a2a import agent_card, task_topic
+from dtm.common.a2a import SELF_TASK_TOPIC, agent_card, task_topic
 from dtm.common.bus import AgentBus, CommitFailed, DeliveryFailed, Inbound
 from dtm.common.config import AgentSettings, ConfigError, FileConfigSource
 from dtm.common.metrics import HANDLER_ERRORS, LOOP_ERRORS
@@ -32,10 +32,19 @@ _LOOP_BACKOFF_S = 1.0
 class AgentRuntime:
     def __init__(self, name: str, bus: AgentBus, config_source: FileConfigSource,
                  describe: Callable[[AgentSettings], tuple[str, list[dict]]],
-                 handler: Callable[[Inbound, AgentSettings], None], *, bootstrap: str):
+                 handler: Callable[[Inbound, AgentSettings], None], *, bootstrap: str,
+                 topics: list[str] | None = None, request_topic: str | None = SELF_TASK_TOPIC):
+        """``topics`` are the logical topics the agent consumes, by default its own task topic.
+
+        ``request_topic`` is the topic its Agent Card advertises, by default its own task topic; an agent
+        that takes no requests (an observer of ``agent.task-events``) passes None and its card lists no
+        interfaces.
+        """
         self.name = name
         self.bus = bus
         self.handler = handler
+        self._topics = list(topics) if topics is not None else [task_topic(name)]
+        self._request_topic = request_topic
         self._config_source = config_source
         self._describe = describe
         self._bootstrap = bootstrap
@@ -54,7 +63,7 @@ class AgentRuntime:
             raise ConfigError(f"agent {self.name!r} is not configured")
         self._settings = config.agents[self.name]
         self._active = self._settings.enabled
-        self.bus.subscribe([task_topic(self.name)])
+        self.bus.subscribe(self._topics)
         self._sync_card()
         if not self._active:
             self.bus.pause()
@@ -154,7 +163,7 @@ class AgentRuntime:
             if self._active:
                 description, skills = self._describe(self._settings)
                 self.bus.publish_card(agent_card(self.name, description, skills, self._settings.config_version,
-                                                 self._bootstrap))
+                                                 self._bootstrap, request_topic=self._request_topic))
             else:
                 self.bus.tombstone_card(self.name)
             self.bus.ensure_delivered(_CARD_DELIVERY_TIMEOUT_S)

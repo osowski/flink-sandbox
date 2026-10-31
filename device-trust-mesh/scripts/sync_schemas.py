@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Vendor the mesh schemas from a GitOps checkout into schemas/.
+"""Vendor the mesh schemas from a GitOps checkout into dtm/schemas/.
 
 Usage: python3 scripts/sync_schemas.py <gitops-checkout> [--check]
 
 Copies <gitops>/workloads/device-trust-mesh/base/schemas/{avro,a2a}/* into
-schemas/ and records the source commit in schemas/SOURCE. With --check,
+dtm/schemas/ and records the source commit in dtm/schemas/SOURCE. With --check,
 nothing is written; the script exits 1 and lists every file that differs.
 """
 import argparse
@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCHEMA_DIR = Path(__file__).resolve().parents[1] / "schemas"
+SCHEMA_DIR = Path(__file__).resolve().parents[1] / "dtm" / "schemas"
 SUBDIRS = ("avro", "a2a")
 SOURCE_RELPATH = Path("workloads/device-trust-mesh/base/schemas")
 

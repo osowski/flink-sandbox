@@ -59,13 +59,27 @@ def _elapsed_ms(started: float) -> int:
     return round((time.monotonic() - started) * 1000)
 
 
+def _integral_floats_to_ints(value):
+    """Return ``value`` with every integral float (``12.0``) turned into an int, recursively."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _integral_floats_to_ints(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_integral_floats_to_ints(v) for v in value]
+    return value
+
+
 def _first_schema_error(schema: dict, content) -> str | None:
     errors = sorted(Draft202012Validator(schema).iter_errors(content), key=lambda e: list(e.path))
     return errors[0].message if errors else None
 
 
 class OllamaProvider:
-    """Calls Ollama's ``/api/chat`` with a JSON-schema ``format`` and validates the reply against it."""
+    """Calls Ollama's ``/api/chat`` with a JSON-schema ``format`` and validates the reply against it.
+
+    Integral floats in the reply (``12.0``) become ints before validation, so integers stay JSON integers.
+    """
 
     def __init__(self, endpoint: str, client: httpx.Client | None = None):
         self._url = endpoint.rstrip("/") + "/api/chat"
@@ -98,7 +112,7 @@ class OllamaProvider:
         tokens = {"prompt_tokens": raw.get("prompt_eval_count"),
                   "completion_tokens": raw.get("eval_count")}
         try:
-            content = json.loads(text)
+            content = _integral_floats_to_ints(json.loads(text))
         except (ValueError, TypeError):
             return LLMResponse(ERROR, None, raw, latency, error="output is not JSON", **tokens)
         problem = _first_schema_error(req.schema, content)
@@ -146,6 +160,9 @@ def provider_for(llm: dict, client: httpx.Client | None = None) -> LLMProvider:
         return OllamaProvider(llm["endpoint"], client)
     if name == "openai-compatible":
         return OpenAICompatibleProvider(llm["endpoint"])
+    if name == "recorded":
+        raise NotImplementedError("recorded provider needs a recordings source; build RecordedProvider "
+                                  "with the recordings for replay")
     raise ValueError(f"unknown llm provider {name!r}")
 
 

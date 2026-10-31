@@ -11,7 +11,7 @@ import yaml
 from confluent_kafka import KafkaError, KafkaException
 from prometheus_client import REGISTRY
 
-from dtm.common.a2a import dumps, send_message_request
+from dtm.common.a2a import dumps, send_message_request, validate
 from dtm.common.bus import AgentBus, BusConfig
 from dtm.common.config import ConfigError, FileConfigSource
 from dtm.common.envelope import Envelope
@@ -60,12 +60,12 @@ class RuntimeTest(unittest.TestCase):
         self.doc = yaml.safe_load((FIXTURE / "agents.yaml").read_text())
         self.handled: list[tuple[int, str]] = []
 
-    def runtime(self, name, handler=None):
+    def runtime(self, name, handler=None, **kwargs):
         bus = AgentBus(name, BusConfig(), producer=FakeProducer(), consumer=FakeConsumer(),
                        avro_serialize=lambda topic, value: json.dumps(value).encode())
         source = FileConfigSource(str(self.root), {"LLM_ENDPOINT": "http://h:11434"})
         return AgentRuntime(name, bus, source, describe, handler or self.recording_handler(),
-                            bootstrap=BOOTSTRAP)
+                            bootstrap=BOOTSTRAP, **kwargs)
 
     def recording_handler(self, on_first=None):
         def handle(inbound, settings):
@@ -119,6 +119,29 @@ class RuntimeTest(unittest.TestCase):
         rt = self.runtime("risk")
         rt.start()
         self.assertEqual(rt.bus._consumer.subscribed, ["agent.tasks.risk"])
+
+    def test_observer_subscribes_to_its_topics_and_publishes_a_card_without_interfaces(self):
+        rt = self.runtime("compliance", topics=["agent.task-events"], request_topic=None)
+        rt.start()
+        self.assertEqual(rt.bus._consumer.subscribed, ["agent.task-events"])
+        card = json.loads(self.last_card(rt))
+        validate("agent.cards", card)
+        self.assertEqual(card["supportedInterfaces"], [])
+        self.assertEqual(card["name"], "compliance")
+
+    def test_request_topic_names_the_card_interface(self):
+        rt = self.runtime("compliance", topics=["agent.task-events"], request_topic="agent.task-events")
+        rt.start()
+        card = json.loads(self.last_card(rt))
+        self.assertEqual(card["supportedInterfaces"][0]["url"], f"kafka://{BOOTSTRAP}/agent.task-events")
+
+    def test_observer_card_without_interfaces_is_republished_on_change(self):
+        rt = self.runtime("compliance", topics=["agent.task-events"], request_topic=None)
+        rt.start()
+        self.set_model("qwen3:8b")
+        rt.step()
+        card = json.loads(self.last_card(rt))
+        self.assertEqual((card["version"], card["supportedInterfaces"]), (rt.settings.config_version, []))
 
     def test_start_disabled_tombstones_and_pauses(self):
         rt = self.runtime("revocation")

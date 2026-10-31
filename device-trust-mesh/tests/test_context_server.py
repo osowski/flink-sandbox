@@ -192,6 +192,27 @@ class ContextServerTest(unittest.IsolatedAsyncioTestCase):
                         self.assertIn("get_device_context",
                                       {t["name"] for t in r.json()["result"]["tools"]})
 
+    async def test_mcp_endpoint_under_the_serve_root_path_does_not_redirect(self):
+        app = api_for()
+        initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                      "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                 "clientInfo": {"name": "test", "version": "0"}}}
+        tools = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+        headers = {"accept": "application/json, text/event-stream"}
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app, root_path="/context-mcp"),
+                                         base_url="http://127.0.0.1") as h:
+                for path in ("/context-mcp/mcp", "/context-mcp/mcp/"):
+                    with self.subTest(path=path):
+                        r = await h.post(path, json=initialize, headers=headers)
+                        self.assertEqual(r.status_code, 200, r.headers.get("location"))
+                        self.assertEqual(r.json()["result"]["serverInfo"]["name"], "context-mcp")
+                        r = await h.post(path, json=tools, headers=headers)
+                        self.assertEqual(r.status_code, 200, r.headers.get("location"))
+                        self.assertIn("get_device_context",
+                                      {t["name"] for t in r.json()["result"]["tools"]})
+                self.assertEqual((await h.get("/context-mcp/healthz")).status_code, 200)
+
     def test_thread_limiter_matches_max_ongoing_requests(self):
         self.assertEqual(THREAD_LIMITER.total_tokens, 32)
 

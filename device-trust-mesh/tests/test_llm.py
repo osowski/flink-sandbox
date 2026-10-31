@@ -102,6 +102,21 @@ class OllamaProviderTest(unittest.TestCase):
         self.assertGreaterEqual(r.latency_ms, 0)
         self.assertIsNone(r.error)
 
+    def test_integral_floats_become_integers(self):
+        schema = {"type": "object",
+                  "properties": {"score": {"type": "integer"}, "weight": {"type": "number"},
+                                 "flags": {"type": "array", "items": {"type": "object"}}},
+                  "required": ["score"]}
+        r = complete_with(body_with_content('{"score": 12.0, "weight": 0.5, "flags": [{"n": 3.0, "ok": true}]}'),
+                          dataclasses.replace(REQ, schema=schema))
+        self.assertEqual(r.status, "OK", r.error)
+        self.assertEqual(r.content, {"score": 12, "weight": 0.5, "flags": [{"n": 3, "ok": True}]})
+        self.assertIs(type(r.content["score"]), int)
+        self.assertIs(type(r.content["flags"][0]["n"]), int)
+        self.assertIs(type(r.content["flags"][0]["ok"]), bool)
+        self.assertEqual(json.dumps(r.content, separators=(",", ":")),
+                         '{"score":12,"weight":0.5,"flags":[{"n":3,"ok":true}]}')
+
     def test_schema_invalid_output_is_error(self):
         r = complete_with(body_with_content('{"score": 400}'))
         self.assertEqual(r.status, "ERROR")
@@ -207,6 +222,10 @@ class ProviderForTest(unittest.TestCase):
     def test_placeholder_message(self):
         with self.assertRaisesRegex(NotImplementedError, "placeholder"):
             OpenAICompatibleProvider("e").complete(REQ)
+
+    def test_recorded_provider_needs_a_recordings_source(self):
+        with self.assertRaisesRegex(NotImplementedError, "recordings source"):
+            provider_for({"provider": "recorded", "endpoint": "e"})
 
     def test_unknown_provider_raises(self):
         with self.assertRaises(ValueError):

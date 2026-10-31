@@ -218,11 +218,26 @@ class MaterializerTest(unittest.TestCase):
     def test_lag_metric_observed(self):
         before_count = metric("dtm_materialization_lag_ms_count", "device.context")
         before_sum = metric("dtm_materialization_lag_ms_sum", "device.context")
-        m = materializer(high={("device.context", 0): 1}, clock=lambda: 10.0)
+        m = materializer(clock=lambda: 10.0)
+        m.run_once()
+        self.assertTrue(m.ready.is_set())
         m._consumer.queue([device_msg(0, ctx(1), timestamp_ms=9_250)])
         m.run_once()
         self.assertEqual(metric("dtm_materialization_lag_ms_count", "device.context") - before_count, 1)
         self.assertEqual(metric("dtm_materialization_lag_ms_sum", "device.context") - before_sum, 750)
+
+    def test_lag_not_observed_during_startup_replay(self):
+        before = metric("dtm_materialization_lag_ms_count", "device.context")
+        m = materializer(high={("device.context", 0): 3}, clock=lambda: 10.0)
+        m._consumer.queue([device_msg(o, ctx(o + 1), timestamp_ms=1_000) for o in (0, 1)])
+        m.run_once()
+        m._consumer.queue([device_msg(2, ctx(3), timestamp_ms=1_000)])
+        m.run_once()
+        self.assertTrue(m.ready.is_set())
+        self.assertEqual(metric("dtm_materialization_lag_ms_count", "device.context"), before)
+        m._consumer.queue([device_msg(3, ctx(4), timestamp_ms=9_900)])
+        m.run_once()
+        self.assertEqual(metric("dtm_materialization_lag_ms_count", "device.context") - before, 1)
 
     def test_lag_not_observed_for_skipped_record(self):
         before = metric("dtm_materialization_lag_ms_count", "device.context")

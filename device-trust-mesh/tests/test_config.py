@@ -57,9 +57,22 @@ class TempRoot(unittest.TestCase):
         return self.src().load()
 
 
+MCP_URL = "http://device-trust-mesh-serve-svc.device-trust-mesh.svc.cluster.local:8000/context-mcp/mcp"
 UNVERSIONABLE = {
-    "unquoted date": "context:\n  since: 2026-10-31\n",
-    "mixed-type keys": "context:\n  1: a\n  b: c\n",
+    "unquoted date": f"context:\n  mcpUrl: {MCP_URL}\n  since: 2026-10-31\n",
+    "mixed-type keys": f"context:\n  mcpUrl: {MCP_URL}\n  1: a\n  b: c\n",
+}
+INVALID_CONTEXT = {
+    "no context block": "",
+    "context not a mapping": "context: [a]\n",
+    "missing mcpUrl": "context:\n  waitTimeoutMs: 2000\n",
+    "empty mcpUrl": "context:\n  mcpUrl: ''\n",
+    "non-string mcpUrl": "context:\n  mcpUrl: 8000\n",
+    "zero waitTimeoutMs": f"context:\n  mcpUrl: {MCP_URL}\n  waitTimeoutMs: 0\n",
+    "negative waitTimeoutMs": f"context:\n  mcpUrl: {MCP_URL}\n  waitTimeoutMs: -1\n",
+    "string waitTimeoutMs": f"context:\n  mcpUrl: {MCP_URL}\n  waitTimeoutMs: '2000'\n",
+    "boolean waitTimeoutMs": f"context:\n  mcpUrl: {MCP_URL}\n  waitTimeoutMs: true\n",
+    "float waitTimeoutMs": f"context:\n  mcpUrl: {MCP_URL}\n  waitTimeoutMs: 2000.5\n",
 }
 
 
@@ -138,6 +151,36 @@ class LoadTests(TempRoot):
                 self.write_agents_text(text)
                 with self.assertRaises(ConfigError):
                     self.src().load()
+
+    def test_agent_settings_carry_the_context_block(self):
+        c = self.src().load()
+        for name in KNOWN_AGENTS:
+            with self.subTest(name):
+                self.assertEqual(c.agents[name].context, {"mcpUrl": MCP_URL, "waitTimeoutMs": 2000})
+
+    def test_wait_timeout_is_optional(self):
+        self.write_agents_text(f"context:\n  mcpUrl: {MCP_URL}\n")
+        self.assertEqual(self.src().load().agents["risk"].context, {"mcpUrl": MCP_URL})
+
+    def test_invalid_context_is_config_error(self):
+        for name, text in INVALID_CONTEXT.items():
+            with self.subTest(name):
+                self.write_agents_text(text)
+                with self.assertRaisesRegex(ConfigError, "context"):
+                    self.src().load()
+
+    def test_unknown_agent_key_is_config_error(self):
+        with self.assertRaisesRegex(ConfigError, "replica\\b"):
+            self.load_with(agents={"risk": {"enabled": True, "replica": 2}})
+
+    def test_unknown_top_level_key_is_config_error(self):
+        self.write_agents_text(f"context:\n  mcpUrl: {MCP_URL}\ncontexts:\n  mcpUrl: {MCP_URL}\n")
+        with self.assertRaisesRegex(ConfigError, "contexts"):
+            self.src().load()
+
+    def test_unknown_bus_key_is_config_error(self):
+        with self.assertRaisesRegex(ConfigError, "policyCommand"):
+            self.load_with(bus={"policyCommand": "disabled"})
 
     def test_missing_agents_yaml_is_config_error(self):
         (self.root / "agents.yaml").unlink()

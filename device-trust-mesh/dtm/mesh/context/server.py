@@ -60,7 +60,9 @@ def build_mcp(table: ContextTable, wait_timeout_ms: int = 2000) -> MCPServer:
         """Return the latest context for a device.
 
         With min_seq the call waits briefly for that context sequence to be materialized; status is
-        OK, STALE (the sequence has not arrived yet; retry) or NOT_FOUND.
+        OK, STALE (the sequence has not arrived yet; retry) or NOT_FOUND. as_of.contextSeq is present
+        only when the device has a context sequence; copy as_of into an artifact's asOf only from an
+        OK result that has it.
         """
         result = await _timed("get_device_context", table.get_device, device_id, min_seq,
                               wait_timeout_ms)
@@ -87,15 +89,26 @@ def build_mcp(table: ContextTable, wait_timeout_ms: int = 2000) -> MCPServer:
 
 
 class _TrailingSlash:
-    """ASGI wrapper that serves ``/mcp`` as ``/mcp/`` so the mount answers without a redirect."""
+    """ASGI wrapper that serves ``/mcp`` as ``/mcp/`` so the mount answers without a redirect.
+
+    The match is on the route path: ``path`` with ``root_path`` removed, since Ray Serve passes the full
+    path (``/context-mcp/mcp``) with ``root_path`` set to the route prefix.
+    """
 
     def __init__(self, app):
         self._app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] in ("http", "websocket") and scope["path"] == "/mcp":
-            scope = {**scope, "path": "/mcp/", "raw_path": b"/mcp/"}
+        if scope["type"] in ("http", "websocket") and _route_path(scope) == "/mcp":
+            scope = {**scope, "path": scope["path"] + "/"}
+            if scope.get("raw_path") is not None:
+                scope["raw_path"] = scope["raw_path"] + b"/"
         await self._app(scope, receive, send)
+
+
+def _route_path(scope) -> str:
+    path, root = scope["path"], scope.get("root_path", "")
+    return path[len(root):] if root and path.startswith(root) else path
 
 
 def build_api(state: ContextState) -> FastAPI:

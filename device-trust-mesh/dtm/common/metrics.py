@@ -20,6 +20,19 @@ LOOP_ERRORS = Counter(
     ["agent"],
 )
 
+INVALID_REQUESTS = Counter(
+    "dtm_invalid_requests",
+    "Inbound records an agent skipped as tombstones, non-requests or schema-invalid.",
+    ["agent"],
+)
+
+PROCESSING_LATENCY_MS = Histogram(
+    "dtm_agent_processing_latency_ms",
+    "Milliseconds an agent's handler took on one inbound record, whether it succeeded or failed.",
+    ["agent"],
+    buckets=(5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000),
+)
+
 LLM_LATENCY_MS = Histogram(
     "dtm_llm_latency_ms",
     "Milliseconds spent in one LLM completion call, by agent, model and outcome status.",

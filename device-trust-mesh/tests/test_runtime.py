@@ -47,6 +47,10 @@ def loop_errors(agent):
     return REGISTRY.get_sample_value("dtm_loop_errors_total", {"agent": agent}) or 0.0
 
 
+def processing_count(agent):
+    return REGISTRY.get_sample_value("dtm_agent_processing_latency_ms_count", {"agent": agent}) or 0.0
+
+
 def kafka_error(code):
     return KafkaException(KafkaError(code))
 
@@ -355,6 +359,23 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(rt.step(), 1)
         self.assertEqual(rt.bus._consumer.committed[-1][2], 2)
         self.assertEqual(handler_errors("risk") - before, 1)
+
+    def test_processing_latency_observed(self):
+        rt = self.runtime("risk")
+        rt.start()
+        before = processing_count("risk")
+        rt.bus._consumer.queue([req(1)])
+        rt.step()
+        self.assertEqual(processing_count("risk") - before, 1)
+
+    def test_processing_latency_observed_when_handler_raises(self):
+        rt = self.runtime("risk", handler=raising)
+        rt.start()
+        before = processing_count("risk")
+        rt.bus._consumer.queue([req(1)])
+        with self.assertLogs("dtm.mesh.runtime", "ERROR"):
+            rt.step()
+        self.assertEqual(processing_count("risk") - before, 1)
 
     def test_delivery_failure_rewinds_without_committing_or_counting(self):
         def produce_and_fail(inbound, settings):

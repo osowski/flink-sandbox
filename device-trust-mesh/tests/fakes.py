@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from confluent_kafka import TopicPartition
+from confluent_kafka import OFFSET_INVALID, TopicPartition
 
 
 @dataclass
@@ -69,14 +69,37 @@ def msg(topic, value, key=None, headers=None, partition=0, offset=0, timestamp_m
     return FakeMessage(topic, value, raw_key, raw_headers, partition, offset, timestamp_ms, error)
 
 
+class CommitLog(list):
+    """The ``(topic, partition, offset)`` commits made so far; calling it mimics ``Consumer.committed``."""
+
+    def __init__(self, offsets, errors):
+        super().__init__()
+        self._offsets = offsets
+        self._errors = errors
+
+    def __call__(self, partitions, timeout=None):
+        return [_tp(p.topic, p.partition, self._offsets.get((p.topic, p.partition), OFFSET_INVALID),
+                    self._errors.get((p.topic, p.partition)))
+                for p in partitions]
+
+
+def _tp(topic, partition, offset, error=None):
+    return SimpleNamespace(topic=topic, partition=partition, offset=offset, error=error)
+
+
 class FakeConsumer:
     def __init__(self):
         self.subscribed: list[str] | None = None
         self.assigned: list[TopicPartition] = []
         self.paused: list[TopicPartition] = []
-        self.committed: list[tuple[str, int, int]] = []
+        self.committed_offsets: dict[tuple[str, int], int] = {}
+        self.committed_errors: dict[tuple[str, int], str] = {}
+        self.committed = CommitLog(self.committed_offsets, self.committed_errors)
+        self.commit_error = None
         self.closed = False
         self.time_offsets: dict[tuple[str, int, int], int] = {}
+        self.time_errors: dict[tuple[str, int], str] = {}
+        self.lookup_timeouts: list[float | None] = []
         self.watermarks: dict[tuple[str, int], tuple[int, int]] = {}
         self.partition_counts: dict[str, int] = {}
         self._queue: list[FakeMessage] = []
@@ -109,12 +132,18 @@ class FakeConsumer:
         return batch
 
     def offsets_for_times(self, partitions, timeout=None):
-        return [TopicPartition(p.topic, p.partition, self.time_offsets.get((p.topic, p.partition, p.offset), -1))
+        self.lookup_timeouts.append(timeout)
+        return [_tp(p.topic, p.partition, self.time_offsets.get((p.topic, p.partition, p.offset), -1),
+                    self.time_errors.get((p.topic, p.partition)))
                 for p in partitions]
 
     def commit(self, offsets=None, asynchronous=True):
+        results = []
         for tp in offsets or []:
-            self.committed.append((tp.topic, tp.partition, tp.offset))
+            results.append(_tp(tp.topic, tp.partition, tp.offset, self.commit_error))
+            if self.commit_error is None:
+                self.committed.append((tp.topic, tp.partition, tp.offset))
+        return results
 
     def pause(self, partitions):
         self.paused = list(partitions)

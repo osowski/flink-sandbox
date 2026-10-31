@@ -6,7 +6,7 @@ import confluent_kafka
 from prometheus_client import REGISTRY
 
 from dtm.common.a2a import (A2AValidationError, dumps, send_message_request, status_update)
-from dtm.common.bus import AgentBus, BusConfig, ConsumeNotAllowed, DeliveryFailed, Inbound
+from dtm.common.bus import AgentBus, BusConfig, CommitFailed, ConsumeNotAllowed, DeliveryFailed, Inbound
 from dtm.common.envelope import Envelope
 from dtm.common.kafka import bootstrap_servers, consumer_config, producer_config, schema_registry_url
 from fakes import FakeConsumer, FakeProducer, msg
@@ -18,6 +18,10 @@ STATUS = status_update("m-1", "t-1", "c-1", "TASK_STATE_WORKING", ENV, "2026-10-
 CMD = {"envelope": ENV.to_avro(), "device_id": "dev-0001", "command": "ALLOW"}
 
 
+REPLAY = {"mode": "replay", "replayRunId": "r1"}
+REPLAY_CONFIG = dict(mode="replay", replay_run_id="r1")
+
+
 def bus(agent, config=None):
     return AgentBus(agent, config or BusConfig(), producer=FakeProducer(), consumer=FakeConsumer(),
                     avro_serialize=lambda topic, value: json.dumps(value).encode(),
@@ -26,6 +30,9 @@ def bus(agent, config=None):
 
 def inbound(topic="agent.tasks.risk", offset=0, headers=None, value=None):
     return Inbound(topic, 0, offset, "dev-0001", headers or {}, value, 0)
+
+
+_SKIPPED = {b"[1]", b"5", b'"s"', b"\xff\xfe"}
 
 
 def hop_latency_sum(agent, topic):
@@ -57,7 +64,28 @@ class ConfigTest(unittest.TestCase):
     def test_offset_and_timestamp_require_start_value(self):
         for position in ("offset", "timestamp"):
             with self.subTest(position=position), self.assertRaises(ValueError):
-                BusConfig.from_dict({"startPosition": position})
+                BusConfig.from_dict({**REPLAY, "startPosition": position})
+
+    def test_rewinding_positions_require_replay_with_run_id(self):
+        for position, value in (("earliest", None), ("offset", {0: 1}), ("timestamp", 5)):
+            for extra in ({}, {"mode": "replay"}, {"replayRunId": "r1"}):
+                with self.subTest(position=position, extra=extra), self.assertRaises(ValueError):
+                    BusConfig.from_dict({"startPosition": position, "startValue": value, **extra})
+            BusConfig.from_dict({**REPLAY, "startPosition": position, "startValue": value})
+
+    def test_offset_start_value_is_a_partition_mapping_with_int_keys(self):
+        c = BusConfig.from_dict({**REPLAY, "startPosition": "offset", "startValue": {"0": 120, 3: 98}})
+        self.assertEqual(c.start_value, {0: 120, 3: 98})
+
+    def test_offset_start_value_rejects_non_mappings_and_bad_entries(self):
+        for value in (42, [1, 2], {}, {"x": 1}, {0: -1}, {0: 1.5}, {-1: 3}, {0: True}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                BusConfig.from_dict({**REPLAY, "startPosition": "offset", "startValue": value})
+
+    def test_timestamp_start_value_is_a_single_int(self):
+        for value in ({0: 1}, "5", 1.5, -1, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                BusConfig.from_dict({**REPLAY, "startPosition": "timestamp", "startValue": value})
 
     def test_enums_validated(self):
         for key, value in (("mode", "batch"), ("startPosition", "latest"), ("policyCommands", "off")):
@@ -133,29 +161,56 @@ class SubscribeTest(unittest.TestCase):
         b.subscribe(["agent.tasks.risk"])
         parts = b._consumer.trigger_assign([("agent.tasks.risk", 0)])
         self.assertEqual(parts[0].offset, confluent_kafka.OFFSET_INVALID)
+        self.assertEqual(b._consumer.assigned, parts)
 
     def test_start_position_earliest_resets_assignment(self):
-        b = bus("risk", BusConfig(start_position="earliest"))
+        b = bus("risk", BusConfig(start_position="earliest", **REPLAY_CONFIG))
         b.subscribe(["agent.tasks.risk"])
         parts = b._consumer.trigger_assign([("agent.tasks.risk", 0)])
         self.assertEqual(parts[0].offset, confluent_kafka.OFFSET_BEGINNING)
         self.assertEqual(b._consumer.assigned, parts)
 
-    def test_start_position_offset(self):
-        b = bus("risk", BusConfig(start_position="offset", start_value=42))
+    def test_committed_partition_is_not_rewound(self):
+        for position, value in (("earliest", None), ("offset", {0: 42, 1: 42}), ("timestamp", 1000)):
+            with self.subTest(position=position):
+                b = bus("risk", BusConfig(start_position=position, start_value=value, **REPLAY_CONFIG))
+                b._consumer.committed_offsets[("agent.tasks.risk", 0)] = 5
+                b.subscribe(["agent.tasks.risk"])
+                parts = b._consumer.trigger_assign([("agent.tasks.risk", 0), ("agent.tasks.risk", 1)])
+                self.assertEqual(parts[0].offset, confluent_kafka.OFFSET_INVALID)
+                self.assertNotEqual(parts[1].offset, confluent_kafka.OFFSET_INVALID)
+                self.assertEqual(b._consumer.assigned, parts)
+
+    def test_committed_lookup_error_raises(self):
+        b = bus("risk", BusConfig(start_position="earliest", **REPLAY_CONFIG))
+        b._consumer.committed_errors[("agent.tasks.risk", 0)] = "broker down"
         b.subscribe(["agent.tasks.risk"])
-        parts = b._consumer.trigger_assign([("agent.tasks.risk", 0), ("agent.tasks.risk", 1)])
-        self.assertEqual([p.offset for p in parts], [42, 42])
+        with self.assertRaises(RuntimeError):
+            b._consumer.trigger_assign([("agent.tasks.risk", 0)])
+
+    def test_start_position_offset_is_per_partition(self):
+        b = bus("risk", BusConfig(start_position="offset", start_value={"0": 42, "2": 7}, **REPLAY_CONFIG))
+        b.subscribe(["agent.tasks.risk"])
+        parts = b._consumer.trigger_assign([("agent.tasks.risk", p) for p in range(3)])
+        self.assertEqual([p.offset for p in parts], [42, confluent_kafka.OFFSET_BEGINNING, 7])
         self.assertEqual(b._consumer.assigned, parts)
 
     def test_start_position_timestamp_resolves_offsets(self):
-        b = bus("risk", BusConfig(start_position="timestamp", start_value=1000))
+        b = bus("risk", BusConfig(start_position="timestamp", start_value=1000, **REPLAY_CONFIG))
         b._consumer.time_offsets[("agent.tasks.risk", 0, 1000)] = 17
         b.subscribe(["agent.tasks.risk"])
         parts = b._consumer.trigger_assign([("agent.tasks.risk", 0), ("agent.tasks.risk", 1)])
         self.assertEqual([(p.partition, p.offset) for p in b._consumer.assigned],
                          [(0, 17), (1, confluent_kafka.OFFSET_END)])
         self.assertEqual(len(parts), 2)
+        self.assertTrue(all(t is not None for t in b._consumer.lookup_timeouts))
+
+    def test_timestamp_resolution_error_raises(self):
+        b = bus("risk", BusConfig(start_position="timestamp", start_value=1000, **REPLAY_CONFIG))
+        b._consumer.time_errors[("agent.tasks.risk", 0)] = "timed out"
+        b.subscribe(["agent.tasks.risk"])
+        with self.assertRaises(RuntimeError):
+            b._consumer.trigger_assign([("agent.tasks.risk", 0)])
 
 
 class SendTest(unittest.TestCase):
@@ -198,6 +253,12 @@ class SendTest(unittest.TestCase):
     def test_reply_uses_inbound_reply_topic(self):
         b = bus("risk", BusConfig(topic_prefix="replay.r1."))
         b.reply(inbound(headers={"a2a-reply-topic": "replay.r1.agent.task-events"}), STATUS, key="dev-0001")
+        self.assertEqual(b._producer.records[-1].topic, "replay.r1.agent.task-events")
+
+    def test_reply_ignores_header_outside_the_prefix(self):
+        b = bus("risk", BusConfig(topic_prefix="replay.r1."))
+        with self.assertLogs("dtm.common.bus", "WARNING"):
+            b.reply(inbound(headers={"a2a-reply-topic": "agent.task-events"}), STATUS, key="dev-0001")
         self.assertEqual(b._producer.records[-1].topic, "replay.r1.agent.task-events")
 
     def test_reply_without_inbound_uses_shared_topic(self):
@@ -285,6 +346,12 @@ class CommitTest(unittest.TestCase):
         b.commit(inbound(offset=7))
         self.assertEqual(b._consumer.committed[-1], ("agent.tasks.risk", 0, 8))
 
+    def test_commit_raises_when_broker_rejects_the_commit(self):
+        b = bus("risk")
+        b._consumer.commit_error = "rebalance in progress"
+        with self.assertRaises(CommitFailed):
+            b.commit(inbound(offset=3))
+
     def test_commit_flushes_the_producer_first(self):
         b = bus("risk")
         b.commit(inbound(offset=1))
@@ -332,6 +399,44 @@ class PollTest(unittest.TestCase):
         with self.assertLogs("dtm.common.bus", "WARNING"):
             self.assertEqual([i.offset for i in b.poll(0.1)], [1])
 
+    def test_poll_batch_defaults_to_ten_and_is_configurable(self):
+        b = bus("risk")
+        b._consumer.queue([msg("agent.cards", value=None, offset=i) for i in range(25)])
+        self.assertEqual(len(b.poll(0.1)), 10)
+        self.assertEqual(len(b.poll(0.1, max_records=4)), 4)
+
+    def test_poll_survives_malformed_records_in_the_batch(self):
+        bad_values = [b"[1]", b"5", b'"s"', b'{"params":"x"}', b'{"result":{"task":5}}', b'{"result":"x"}',
+                      b'{"params":{"message":{"metadata":{"urn:device-trust-mesh:envelope:v1":{"eventTime":"x"}}}}}',
+                      b'{"params":{"message":{"metadata":{"urn:device-trust-mesh:envelope:v1":{"eventTime":true}}}}}',
+                      b'{"params":{"message":{"metadata":[]}}}', b"\xff\xfe"]
+        for value in bad_values:
+            with self.subTest(value=value):
+                b = bus("hop-bad")
+                b._consumer.queue([msg("agent.task-events", value=value),
+                                   msg("agent.task-events", value=dumps(STATUS), offset=1)])
+                with self.assertLogs("dtm.common.bus", "WARNING") if value in _SKIPPED else self.assertNoLogs(
+                        "dtm.common.bus", "WARNING"):
+                    got = b.poll(0.1)
+                self.assertEqual(got[-1].value, STATUS)
+                self.assertEqual(len(got), 1 if value in _SKIPPED else 2)
+
+    def test_poll_skips_records_with_undecodable_key_or_headers(self):
+        b = bus("risk")
+        bad_key = msg("agent.cards", value=None, key=b"\xff", offset=0)
+        bad_header = msg("agent.cards", value=None, offset=1)
+        bad_header._headers = [("h", b"\xff")]
+        b._consumer.queue([bad_key, bad_header, msg("agent.cards", value=None, offset=2)])
+        with self.assertLogs("dtm.common.bus", "WARNING"):
+            self.assertEqual([i.offset for i in b.poll(0.1)], [2])
+
+    def test_poll_drops_none_valued_headers(self):
+        b = bus("risk")
+        m = msg("agent.cards", value=None)
+        m._headers = [("keep", b"v"), ("null", None)]
+        b._consumer.queue([m])
+        self.assertEqual(b.poll(0.1)[0].headers, {"keep": "v"})
+
     def test_poll_observes_hop_latency_for_requests_and_events(self):
         b = bus("hop-agent")
         b._consumer.queue([msg("agent.tasks.hop-agent", value=dumps(REQ)),
@@ -356,6 +461,17 @@ class LifecycleTest(unittest.TestCase):
         b.pause()
         self.assertEqual(b._consumer.paused, parts)
         b.resume()
+        self.assertEqual(b._consumer.paused, [])
+
+    def test_pause_survives_a_rebalance_until_resume(self):
+        b = bus("risk")
+        b.subscribe(["agent.tasks.risk"])
+        b.pause()
+        parts = b._consumer.trigger_assign([("agent.tasks.risk", 0), ("agent.tasks.risk", 1)])
+        self.assertEqual(b._consumer.paused, parts)
+        b.resume()
+        self.assertEqual(b._consumer.paused, [])
+        b._consumer.trigger_assign([("agent.tasks.risk", 2)])
         self.assertEqual(b._consumer.paused, [])
 
     def test_close_flushes_and_closes(self):

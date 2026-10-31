@@ -25,7 +25,9 @@ _MODES = ("live", "replay")
 _START_POSITIONS = ("committed", "earliest", "offset", "timestamp")
 _POLICY_COMMAND_MODES = ("enabled", "redirect", "disabled")
 _FLUSH_TIMEOUT_S = 10.0
-_POLL_BATCH = 100
+_LOOKUP_TIMEOUT_S = 10.0
+_POLL_BATCH = 10
+_REPLAY_ONLY_POSITIONS = ("earliest", "offset", "timestamp")
 
 
 class ConsumeNotAllowed(ValueError):
@@ -33,7 +35,32 @@ class ConsumeNotAllowed(ValueError):
 
 
 class DeliveryFailed(RuntimeError):
-    """Raised when a produced record was not acknowledged by the broker."""
+    """Raised by ``commit`` when a produced record was not acknowledged by the broker.
+
+    Nothing was committed. The caller must re-process the same inbound record, or stop, before
+    committing anything later; committing a later offset would skip the failed record's input.
+    """
+
+
+class CommitFailed(RuntimeError):
+    """Raised when the broker rejected an offset commit."""
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _partition_offsets(value) -> dict[int, int]:
+    """Normalize a ``{partition: offset}`` mapping, accepting int or str keys, into int keys."""
+    if not isinstance(value, dict) or not value:
+        raise ValueError("startPosition offset requires startValue as a non-empty {partition: offset} mapping")
+    try:
+        offsets = {int(k): v for k, v in value.items()}
+    except (TypeError, ValueError):
+        raise ValueError(f"startValue partitions must be integers; got {sorted(map(str, value))}") from None
+    if any(p < 0 for p in offsets) or not all(_is_int(o) and o >= 0 for o in offsets.values()):
+        raise ValueError("startValue must map non-negative partitions to non-negative offsets")
+    return offsets
 
 
 def _one_of(name: str, value: str, allowed: tuple[str, ...]) -> None:
@@ -45,7 +72,7 @@ def _one_of(name: str, value: str, allowed: tuple[str, ...]) -> None:
 class BusConfig:
     mode: str = "live"
     start_position: str = "committed"
-    start_value: int | None = None
+    start_value: int | dict[int, int] | None = None
     topic_prefix: str = ""
     policy_commands: str = "enabled"
     allowed_consume: tuple[str, ...] = ("agent.tasks.<self>", "agent.task-events", "agent.cards")
@@ -57,8 +84,13 @@ class BusConfig:
         _one_of("policyCommands", self.policy_commands, _POLICY_COMMAND_MODES)
         if self.policy_commands == "redirect" and not self.topic_prefix:
             raise ValueError("policyCommands redirect requires a non-empty topicPrefix")
-        if self.start_position in ("offset", "timestamp") and self.start_value is None:
-            raise ValueError(f"startPosition {self.start_position} requires startValue")
+        if self.start_position in _REPLAY_ONLY_POSITIONS and not (self.mode == "replay" and self.replay_run_id):
+            raise ValueError(f"startPosition {self.start_position} requires mode replay and a replayRunId")
+        if self.start_position == "offset":
+            object.__setattr__(self, "start_value", _partition_offsets(self.start_value))
+        elif self.start_position == "timestamp":
+            if not _is_int(self.start_value) or self.start_value < 0:
+                raise ValueError("startPosition timestamp requires startValue as epoch milliseconds")
 
     @classmethod
     def from_dict(cls, d: dict) -> "BusConfig":
@@ -91,11 +123,15 @@ def _group_id(agent: str, config: BusConfig) -> str:
 
 def _a2a_envelope(record: dict) -> dict | None:
     """Return the envelope dict of an A2A request or task event, or None when the record carries none."""
-    if "params" in record:
-        carrier = record["params"].get("message", {})
+    params = record.get("params")
+    if isinstance(params, dict):
+        carrier = params.get("message")
     else:
-        carrier = next(iter(record.get("result", {}).values()), {})
-    return carrier.get("metadata", {}).get(ENVELOPE_URI)
+        result = record.get("result")
+        carrier = next(iter(result.values()), None) if isinstance(result, dict) else None
+    metadata = carrier.get("metadata") if isinstance(carrier, dict) else None
+    envelope = metadata.get(ENVELOPE_URI) if isinstance(metadata, dict) else None
+    return envelope if isinstance(envelope, dict) else None
 
 
 def _a2a_context_id(record: dict) -> str | None:
@@ -115,6 +151,7 @@ class AgentBus:
         self._clock = clock
         self._delivery_errors: list = []
         self._produced: set[str] = set()
+        self._paused = False
         self._allowed = {name.replace("<self>", agent) for name in config.allowed_consume}
 
     @classmethod
@@ -162,54 +199,73 @@ class AgentBus:
         if refused:
             raise ConsumeNotAllowed(f"{self.agent} may not consume {', '.join(refused)}; "
                                     f"allowed: {', '.join(sorted(self._allowed))}")
-        physical = [self.topic(t) for t in topics]
-        if self.config.start_position == "committed":
-            self._consumer.subscribe(physical)
-        else:
-            self._consumer.subscribe(physical, on_assign=self._on_assign)
+        self._consumer.subscribe([self.topic(t) for t in topics], on_assign=self._on_assign)
 
     def _on_assign(self, consumer, partitions: list[TopicPartition]) -> None:
+        if self.config.start_position != "committed":
+            self._apply_start_position(consumer, partitions)
+        consumer.assign(partitions)
+        if self._paused:
+            consumer.pause(partitions)
+
+    def _apply_start_position(self, consumer, partitions: list[TopicPartition]) -> None:
+        """Set start offsets on the partitions that have no committed offset; the others resume where they left off."""
+        committed = consumer.committed(partitions, timeout=_LOOKUP_TIMEOUT_S)
+        for tp in committed:
+            if tp.error:
+                raise RuntimeError(f"cannot read committed offset of {tp.topic}[{tp.partition}]: {tp.error}")
+        has_commit = {(tp.topic, tp.partition) for tp in committed if tp.offset >= 0}
+        fresh = [tp for tp in partitions if (tp.topic, tp.partition) not in has_commit]
         position, value = self.config.start_position, self.config.start_value
         if position == "earliest":
-            for tp in partitions:
+            for tp in fresh:
                 tp.offset = OFFSET_BEGINNING
         elif position == "offset":
-            for tp in partitions:
-                tp.offset = value
-        elif position == "timestamp":
-            for tp in partitions:
-                tp.offset = value
-            partitions = consumer.offsets_for_times(partitions)
-            for tp in partitions:
-                if tp.offset < 0:
-                    tp.offset = OFFSET_END
-        consumer.assign(partitions)
+            for tp in fresh:
+                tp.offset = value.get(tp.partition, OFFSET_BEGINNING)
+        elif position == "timestamp" and fresh:
+            probes = [TopicPartition(tp.topic, tp.partition, value) for tp in fresh]
+            resolved = {(r.topic, r.partition): r for r in
+                        consumer.offsets_for_times(probes, timeout=_LOOKUP_TIMEOUT_S)}
+            for tp in fresh:
+                r = resolved[(tp.topic, tp.partition)]
+                if r.error:
+                    raise RuntimeError(f"cannot resolve timestamp {value} for {tp.topic}[{tp.partition}]: {r.error}")
+                tp.offset = r.offset if r.offset >= 0 else OFFSET_END
 
-    def poll(self, timeout: float) -> list[Inbound]:
+    def poll(self, timeout: float, max_records: int = _POLL_BATCH) -> list[Inbound]:
+        """Return up to ``max_records`` decoded records; errored or undecodable records are logged and skipped."""
         inbound = []
-        for m in self._consumer.consume(num_messages=_POLL_BATCH, timeout=timeout):
+        for m in self._consumer.consume(num_messages=max_records, timeout=timeout):
             if m.error():
                 log.warning("consume error on %s: %s", m.topic(), m.error())
                 continue
             try:
-                value = None if m.value() is None else json.loads(m.value())
-            except ValueError:
-                log.warning("skipping undecodable record at %s[%s]@%s", m.topic(), m.partition(), m.offset())
+                record = self._decode(m)
+            except (ValueError, TypeError, AttributeError) as e:
+                log.warning("skipping undecodable record at %s[%s]@%s: %s", m.topic(), m.partition(), m.offset(), e)
                 continue
-            key = m.key()
-            headers = {k: v.decode("utf-8") for k, v in m.headers() or []}
-            record = Inbound(m.topic(), m.partition(), m.offset(),
-                             key.decode("utf-8") if key is not None else None,
-                             headers, value, m.timestamp()[1])
             self._observe_hop(record)
             inbound.append(record)
         return inbound
 
+    @staticmethod
+    def _decode(m) -> Inbound:
+        value = None if m.value() is None else json.loads(m.value())
+        if value is not None and not isinstance(value, dict):
+            raise ValueError(f"value is {type(value).__name__}, not a JSON object")
+        key = m.key()
+        headers = {k: v.decode("utf-8") for k, v in m.headers() or [] if v is not None}
+        return Inbound(m.topic(), m.partition(), m.offset(),
+                       key.decode("utf-8") if key is not None else None,
+                       headers, value, m.timestamp()[1])
+
     def _observe_hop(self, record: Inbound) -> None:
         envelope = _a2a_envelope(record.value) if record.value is not None else None
-        if envelope is not None and "eventTime" in envelope:
+        event_time = envelope.get("eventTime") if envelope is not None else None
+        if _is_int(event_time):
             HOP_LATENCY_MS.labels(self.agent, self.logical_topic(record.topic)).observe(
-                self._clock() * 1000 - envelope["eventTime"])
+                self._clock() * 1000 - event_time)
 
     def send(self, to_agent: str, request: dict, key: str) -> None:
         logical = task_topic(to_agent)
@@ -218,8 +274,15 @@ class AgentBus:
 
     def reply(self, inbound: Inbound | None, record: dict, key: str) -> None:
         validate(REPLY_TOPIC, record)
-        topic = inbound.headers.get("a2a-reply-topic") if inbound is not None else None
-        self._produce(topic or self.topic(REPLY_TOPIC), dumps(record), key, self._a2a_headers(record))
+        self._produce(self._reply_topic(inbound), dumps(record), key, self._a2a_headers(record))
+
+    def _reply_topic(self, inbound: Inbound | None) -> str:
+        """Return the topic named by the inbound's reply header, or the shared reply topic when absent or outside the prefix."""
+        requested = inbound.headers.get("a2a-reply-topic") if inbound is not None else None
+        if requested and not requested.startswith(self.config.topic_prefix):
+            log.warning("ignoring reply topic %s outside prefix %s", requested, self.config.topic_prefix)
+            return self.topic(REPLY_TOPIC)
+        return requested or self.topic(REPLY_TOPIC)
 
     def publish_card(self, card: dict) -> None:
         validate(CARDS_TOPIC, card)
@@ -240,20 +303,31 @@ class AgentBus:
         self._produce(physical, self._avro_serialize(topic, value), key, None)
 
     def commit(self, inbound: Inbound) -> None:
-        """Commit the offset after inbound, but only once every record produced so far is delivered."""
+        """Commit the offset after inbound, but only once every record produced so far is delivered.
+
+        Raises ``DeliveryFailed`` without committing if a produced record failed; the caller must then
+        re-process the same inbound (or stop) before committing anything later. Raises ``CommitFailed``
+        if the broker rejects the offset commit.
+        """
         remaining = self._producer.flush(_FLUSH_TIMEOUT_S)
         errors, self._delivery_errors = self._delivery_errors, []
         if errors:
             raise DeliveryFailed(f"{len(errors)} record(s) not delivered: {errors[0]}")
         if remaining:
             raise DeliveryFailed(f"{remaining} record(s) still undelivered after {_FLUSH_TIMEOUT_S}s")
-        self._consumer.commit(offsets=[TopicPartition(inbound.topic, inbound.partition, inbound.offset + 1)],
-                              asynchronous=False)
+        results = self._consumer.commit(
+            offsets=[TopicPartition(inbound.topic, inbound.partition, inbound.offset + 1)], asynchronous=False)
+        failed = [tp for tp in results or [] if tp.error]
+        if failed:
+            raise CommitFailed(f"commit rejected for {failed[0].topic}[{failed[0].partition}]: {failed[0].error}")
 
     def pause(self) -> None:
+        """Pause consumption, including partitions assigned by later rebalances, until ``resume``."""
+        self._paused = True
         self._consumer.pause(self._consumer.assignment())
 
     def resume(self) -> None:
+        self._paused = False
         self._consumer.resume(self._consumer.assignment())
 
     def close(self) -> None:

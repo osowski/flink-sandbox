@@ -151,6 +151,10 @@ class AgentDeploymentTest(unittest.TestCase):
         self.assertEqual(agent_deployment("RiskAgent", "risk", lambda bus, ctx, llm: RecordingAgent()).name,
                          "RiskAgent")
 
+    def test_replica_reserves_a_fraction_of_a_cpu(self):
+        deployment = agent_deployment("RiskAgent", "risk", lambda bus, ctx, llm: RecordingAgent())
+        self.assertEqual(deployment.ray_actor_options["num_cpus"], 0.1)
+
     def test_api_serves_health_and_metrics(self):
         client = TestClient(build_agent_api("risk"))
         health = client.get("/healthz")

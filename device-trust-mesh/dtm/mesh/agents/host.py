@@ -121,7 +121,9 @@ def agent_deployment(deployment_name: str, name: str, make_agent) -> serve.Deplo
         # Built inside the replica, like the context-mcp app.
         return build_agent_api(name)
 
-    @serve.deployment(name=deployment_name)
+    # Each agent replica mostly waits on Kafka and context-mcp, so it reserves a fraction of a CPU; the
+    # RayService's serveConfigV2 can override it per deployment.
+    @serve.deployment(name=deployment_name, ray_actor_options={"num_cpus": 0.1})
     @serve.ingress(builder)
     class AgentDeployment:
         def __init__(self):

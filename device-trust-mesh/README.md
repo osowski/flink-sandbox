@@ -20,6 +20,10 @@ Agents read business data (device and customer context, risk signals) **only** t
 
 `AgentRuntime` re-reads `agents.yaml` and the prompt files before every message. An agent's `enabled`, `llm` and `promptRef` changes, and the `bus.policyCommands` mode, take effect on the next message; a disabled agent (or one removed from `agents.yaml`) withdraws its Agent Card and pauses its consumer. Changes to `bus.topicPrefix`, `bus.startPosition`, `bus.startValue`, `bus.allowedConsume`, `bus.mode` and `bus.replayRunId` need a pod restart: the runtime refuses such a config, logs an error and keeps its previous settings.
 
+`agents.yaml` accepts only the top-level keys `llm`, `agents`, `bus` and `context`, and in an agent block only `enabled`, `replicas`, `promptRef` and `llm`; an unknown key (in those or in `bus`) makes the config invalid. Every agent's settings carry the `context` block: `mcpUrl` (required) is the `context-mcp` endpoint the agent calls, and `waitTimeoutMs` (optional, a positive integer) is validated but not read by `context-mcp`, whose server-side wait comes from `DTM_CONTEXT_WAIT_TIMEOUT_MS`.
+
+An agent consumes its own `agent.tasks.<name>` topic and its card advertises that topic. An observer of `agent.task-events`, such as Compliance, passes `topics=["agent.task-events"]` and `request_topic=None` to `AgentRuntime`; its card lists no interfaces.
+
 ## Images
 
 `quay.io/osowski/device-trust-mesh-simulator` and `quay.io/osowski/device-trust-mesh-ray` are built by the `device-trust-mesh-build-images.yml` workflow ([#30](https://github.com/osowski/flink-sandbox/issues/30)).

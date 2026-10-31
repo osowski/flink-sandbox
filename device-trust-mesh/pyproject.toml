@@ -2,15 +2,19 @@
 name = "device-trust-mesh"
 version = "0.0.0"
 description = "Agentic Device Trust Mesh: Kafka, Flink and A2A agents on KubeRay"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "ray[serve]",
-    "confluent-kafka[avro,schemaregistry,json]",
-    "mcp",
-    "a2a-sdk",
-    "httpx",
-    "prometheus-client",
+    "ray[serve]==2.59.0",
+    "confluent-kafka[avro,schemaregistry,json]==2.16.1",
+    "mcp==2.3.0",
+    "a2a-sdk==1.3.0",
+    "httpx==0.28.1",
+    "prometheus-client==0.26.0",
+    "pyyaml==6.0.3",
 ]
 
 [tool.setuptools.packages.find]
 include = ["dtm*"]
+
+[tool.setuptools.package-data]
+dtm = ["py.typed", "schemas/SOURCE", "schemas/avro/*.avsc", "schemas/a2a/*.json"]

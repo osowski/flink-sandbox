@@ -65,3 +65,7 @@ nbdist/
 .claude/
 */.github/
 docs/superpowers/
+
+# Python environments
+.venv/
+*.egg-info/

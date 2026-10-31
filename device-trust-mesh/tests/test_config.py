@@ -11,6 +11,7 @@ import yaml
 from dtm.common.config import KNOWN_AGENTS, ConfigError, FileConfigSource
 
 FIXTURE = Path(__file__).parent / "fixtures" / "etc-dtm"
+PACKAGED_RISK = Path(__file__).parents[1] / "dtm" / "prompts" / "risk.v1"
 ENDPOINT = "http://h:11434"
 
 
@@ -126,10 +127,28 @@ class LoadTests(TempRoot):
         with self.assertRaises(ConfigError):
             self.load_with(risk_llm={"provider": "carrier-pigeon"})
 
-    def test_missing_prompt_file_is_config_error(self):
+    def test_unknown_prompt_ref_raises(self):
+        with self.assertRaisesRegex(ConfigError, "nope.v1.*prompts/.*packaged"):
+            self.load_with(agents={"risk": {"enabled": True, "replicas": 1, "promptRef": "nope.v1"}})
+
+    def test_prompt_falls_back_to_packaged(self):
         (self.root / "prompts" / "risk.v1").unlink()
-        with self.assertRaises(ConfigError):
-            self.src().load()
+        agent = self.src().load().agents["risk"]
+        self.assertEqual(agent.prompt_text, PACKAGED_RISK.read_text(encoding="utf-8"))
+        self.assertEqual(agent.prompt_ref, "risk.v1")
+
+    def test_mounted_prompt_overrides_packaged(self):
+        (self.root / "prompts" / "risk.v1").unlink()
+        packaged = self.src().load().agents["risk"]
+        (self.root / "prompts" / "risk.v1").write_text("mounted override")
+        mounted = self.src().load().agents["risk"]
+        self.assertEqual(mounted.prompt_text, "mounted override")
+        self.assertNotEqual(mounted.config_version, packaged.config_version)
+
+    def test_packaged_prompt_ref_cannot_leave_the_prompts_package(self):
+        for ref in ("../__init__.py", "../prompts/risk.v1", ".."):
+            with self.subTest(ref=ref), self.assertRaises(ConfigError):
+                self.load_with(agents={"risk": {"enabled": True, "replicas": 1, "promptRef": ref}})
 
     def test_prompt_ref_cannot_leave_prompts_dir(self):
         (self.root / "secret").write_text("x")
@@ -253,7 +272,7 @@ class RefreshTests(TempRoot):
     def test_refresh_keeps_last_good_when_a_prompt_file_is_missing(self):
         s = self.src()
         s.load()
-        (self.root / "prompts" / "risk.v1").unlink()
+        self.edit_agents(agents={"risk": {"enabled": True, "replicas": 1, "promptRef": "nope.v1"}})
         with self.assertLogs("dtm.common.config", logging.ERROR):
             self.assertIsNone(s.refresh())
 

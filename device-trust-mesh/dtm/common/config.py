@@ -8,6 +8,7 @@ of what was read, and the next refresh sees the settled files as a new digest.
 """
 import copy
 import hashlib
+import importlib.resources
 import json
 import logging
 import os
@@ -115,6 +116,17 @@ def _validate_context(context: dict) -> None:
         wait = context["waitTimeoutMs"]
         if not _is_int(wait) or wait <= 0:
             raise ConfigError(f"context.waitTimeoutMs must be a positive integer; got {wait!r}")
+
+
+def _packaged_prompt(ref: str) -> bytes | None:
+    """Return the bytes of the prompt shipped in the package, or None when ``ref`` names none."""
+    if ref.startswith(".") or ref != Path(ref).name:
+        return None
+    prompt = importlib.resources.files("dtm") / "prompts" / ref
+    try:
+        return prompt.read_bytes() if prompt.is_file() else None
+    except OSError as e:
+        raise ConfigError(f"cannot read packaged prompt {ref!r}: {e}") from e
 
 
 @dataclass(frozen=True)
@@ -233,10 +245,14 @@ class FileConfigSource:
         prompt_ref = raw.get("promptRef")
         prompt_text = None
         if prompt_ref is not None:
-            if prompt_ref not in snapshot.prompts:
-                raise ConfigError(f"agents.{name}.promptRef {prompt_ref!r} has no file under prompts/")
+            prompt_bytes = snapshot.prompts.get(prompt_ref)
+            if prompt_bytes is None:
+                prompt_bytes = _packaged_prompt(prompt_ref)
+            if prompt_bytes is None:
+                raise ConfigError(f"agents.{name}.promptRef {prompt_ref!r} has no file under prompts/ "
+                                  "and no packaged prompt")
             try:
-                prompt_text = snapshot.prompts[prompt_ref].decode("utf-8")
+                prompt_text = prompt_bytes.decode("utf-8")
             except UnicodeDecodeError as e:
                 raise ConfigError(f"prompt {prompt_ref!r} is not valid UTF-8: {e}") from e
 

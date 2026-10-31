@@ -5,8 +5,10 @@ message. A disabled agent, or one removed from ``agents.yaml``, has no card on `
 consumer is paused; records fetched before the pause and not yet handled are rewound so the paused
 consumer delivers them again after re-enabling.
 
-Card writes are confirmed as soon as they are made. An unconfirmed card operation is retried at the
-start of every ``step`` and never reaches a message commit. Of the bus settings only ``policyCommands``
+Card writes are confirmed as soon as they are made. An unconfirmed card operation, whether it failed
+delivery or raised, is retried at the start of every ``step`` and never reaches a message commit. A
+pause or resume that follows a lifecycle change is applied even when the card write raises. Records of
+a batch that were fetched but not handled are rewound when anything unexpected escapes ``step``. Of the bus settings only ``policyCommands``
 is applied on reload; a config that changes any other bus setting is refused and the agent keeps its
 previous settings.
 """
@@ -66,20 +68,25 @@ class AgentRuntime:
             self._reload()
             return 0
         handled = 0
-        for i, inbound in enumerate(batch):
-            self._reload()
-            if not self._active:
-                self._rewind(batch[i:])
-                break
-            self._handle(inbound)
-            try:
-                self.bus.commit(inbound)
-            except (DeliveryFailed, CommitFailed) as e:
-                log.error("%s: not committing %s[%s]@%s, it will be processed again: %s",
-                          self.name, inbound.topic, inbound.partition, inbound.offset, e)
-                self._rewind(batch[i:])
-                break
-            handled += 1
+        i = 0
+        try:
+            for i, inbound in enumerate(batch):
+                self._reload()
+                if not self._active:
+                    self._rewind(batch[i:])
+                    break
+                self._handle(inbound)
+                try:
+                    self.bus.commit(inbound)
+                except (DeliveryFailed, CommitFailed) as e:
+                    log.error("%s: not committing %s[%s]@%s, it will be processed again: %s",
+                              self.name, inbound.topic, inbound.partition, inbound.offset, e)
+                    self._rewind(batch[i:])
+                    break
+                handled += 1
+        except Exception:
+            self._rewind(batch[i:])
+            raise
         return handled
 
     def run(self, stop: threading.Event) -> None:
@@ -129,11 +136,15 @@ class AgentRuntime:
         if new is not None:
             self._settings = new
         if was_active and not self._active:
-            self._sync_card()
-            self.bus.pause()
+            try:
+                self._sync_card()
+            finally:
+                self.bus.pause()
         elif self._active and not was_active:
-            self._sync_card()
-            self.bus.resume()
+            try:
+                self._sync_card()
+            finally:
+                self.bus.resume()
         elif self._active and new.config_version != old.config_version:
             self._sync_card()
 
@@ -150,5 +161,8 @@ class AgentRuntime:
         except DeliveryFailed as e:
             self._card_confirmed = False
             log.error("%s: agent card not delivered, retrying on the next step: %s", self.name, e)
+        except BaseException:
+            self._card_confirmed = False
+            raise
         else:
             self._card_confirmed = True

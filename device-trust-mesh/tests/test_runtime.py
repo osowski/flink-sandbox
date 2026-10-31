@@ -431,6 +431,79 @@ class RuntimeTest(unittest.TestCase):
         self.assertIsNone(self.last_card(rt))
         self.assertTrue(rt.bus.paused)
 
+    @staticmethod
+    def fail_once(rt, name, error):
+        """Make the bus method ``name`` raise ``error`` on its first call only."""
+        original, calls = getattr(rt.bus, name), []
+
+        def wrapper(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise error
+            return original(*args, **kwargs)
+        setattr(rt.bus, name, wrapper)
+
+    def test_unexpected_card_error_in_a_mid_batch_reload_rewinds_and_the_card_is_retried(self):
+        rt = self.runtime("risk")
+        rt.start()
+        self.fail_once(rt, "publish_card", BufferError("queue full"))
+        self.set_model("qwen3:8b")
+        rt.bus._consumer.queue([req(1), req(2), req(5, partition=1)])
+        with self.assertRaises(BufferError):
+            rt.step()
+        self.assertEqual(self.handled, [])
+        self.assertEqual(rt.bus._consumer.committed, [])
+        self.assertEqual(sorted(rt.bus._consumer.seeks), [("agent.tasks.risk", 0, 1), ("agent.tasks.risk", 1, 5)])
+        published = len(rt.bus._producer.records)
+        rt.step()
+        self.assertEqual(len(rt.bus._producer.records), published + 1)
+        self.assertEqual(json.loads(self.last_card(rt))["version"], rt.settings.config_version)
+
+    def test_unexpected_error_after_some_messages_rewinds_only_the_unhandled_ones(self):
+        rt = self.runtime("risk")
+        rt.start()
+        rt.handler = self.recording_handler(on_first=lambda: self.set_model("qwen3:8b"))
+        self.fail_once(rt, "publish_card", BufferError("queue full"))
+        rt.bus._consumer.queue([req(1), req(2), req(3)])
+        with self.assertRaises(BufferError):
+            rt.step()
+        self.assertEqual([o for o, _ in self.handled], [1])
+        self.assertEqual(rt.bus._consumer.committed, [("agent.tasks.risk", 0, 2)])
+        self.assertEqual(rt.bus._consumer.seeks, [("agent.tasks.risk", 0, 2)])
+
+    def test_unexpected_commit_error_rewinds_the_record(self):
+        rt = self.runtime("risk")
+        rt.start()
+        rt.bus._consumer.commit_raises = RuntimeError("unexpected")
+        rt.bus._consumer.queue([req(1), req(2)])
+        with self.assertRaises(RuntimeError):
+            rt.step()
+        self.assertEqual(rt.bus._consumer.seeks, [("agent.tasks.risk", 0, 1)])
+
+    def test_agent_still_pauses_when_the_tombstone_write_raises(self):
+        rt = self.runtime("risk")
+        rt.start()
+        self.fail_once(rt, "tombstone_card", BufferError("queue full"))
+        self.set_enabled("risk", False)
+        with self.assertRaises(BufferError):
+            rt.step()
+        self.assertTrue(rt.bus.paused)
+        published = len(rt.bus._producer.records)
+        rt.step()
+        self.assertEqual(len(rt.bus._producer.records), published + 1)
+        self.assertIsNone(self.last_card(rt))
+
+    def test_agent_still_resumes_when_the_card_write_raises(self):
+        rt = self.runtime("revocation")
+        rt.start()
+        self.fail_once(rt, "publish_card", BufferError("queue full"))
+        self.set_enabled("revocation", True)
+        with self.assertRaises(BufferError):
+            rt.step()
+        self.assertFalse(rt.bus.paused)
+        rt.step()
+        self.assertEqual(json.loads(self.last_card(rt))["version"], rt.settings.config_version)
+
     def test_a_card_failure_never_makes_a_message_commit_raise(self):
         rt = self.runtime("risk")
         rt.start()

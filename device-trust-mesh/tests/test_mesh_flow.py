@@ -4,6 +4,7 @@ import unittest
 
 from agent_fakes import (ROUTER_ENVELOPE, ScriptedProvider, context_table, make_bus, produced, pump,
                          request_inbound, settings)
+from dtm.common import ids
 from dtm.mesh.agents.compliance import ComplianceAgent
 from dtm.mesh.agents.context import SyncContext
 from dtm.mesh.agents.enrolment import EnrolmentAgent
@@ -65,6 +66,11 @@ class MeshFlowTest(unittest.TestCase):
     def events(self, name):
         return [next(iter(value["result"].items())) for _, value in produced(self.buses[name], "agent.task-events")]
 
+    def sequence(self, name):
+        """The task-events of agent ``name`` in order: each status state, or each artifact's name."""
+        return [carrier["artifact"]["name"] if kind == "artifactUpdate" else carrier["status"]["state"]
+                for kind, carrier in self.events(name)]
+
     def audits(self):
         return [(a["subject_agent"], a["artifact_name"], a["outcome"])
                 for _, a in produced(self.buses["compliance"], "audit.log")]
@@ -120,10 +126,13 @@ class MeshFlowTest(unittest.TestCase):
         context_ids |= {record["envelope"]["correlation_id"] for record in self.avro_records()}
         self.assertEqual(context_ids, {ROUTER_ENVELOPE.correlation_id})
 
-        states = [carrier["artifact"]["name"] if kind == "artifactUpdate" else carrier["status"]["state"]
-                  for kind, carrier in self.events("enrolment")]
-        enrolment_states = [s for s in states if s.startswith("TASK_STATE")]
-        self.assertEqual(enrolment_states, [SUBMITTED, WORKING, AUTH_REQUIRED, WORKING, COMPLETED])
+        self.assertEqual(self.sequence("risk"), [SUBMITTED, WORKING, "risk-assessment", COMPLETED])
+        self.assertEqual(self.sequence("enrolment"),
+                         [SUBMITTED, WORKING, "enrolment-decision", AUTH_REQUIRED,
+                          WORKING, "enrolment-decision", COMPLETED])
+        self.assertEqual(self.sequence("step-up"), [SUBMITTED, WORKING, "step-up-challenge", COMPLETED])
+        for name in ("risk", "enrolment"):
+            self.assertEqual(len(produced(self.buses[name], "agent.llm-interactions")), 1)
         self.assertEqual({carrier.get("taskId", carrier.get("id")) for _, carrier in self.events("enrolment")},
                          {enrolment_task_id})
 
@@ -141,6 +150,7 @@ class MeshFlowTest(unittest.TestCase):
         (_, step_up_handoff), = produced(self.buses["enrolment"], "agent.tasks.step-up")
         risk_handoff, step_up_handoff = (m["params"]["message"] for m in (risk_handoff, step_up_handoff))
         self.assertEqual(risk_handoff["metadata"][ENVELOPE]["causationId"], "router-0")
+        self.assertEqual(risk_handoff["referenceTaskIds"], [ids.task_id("agent:risk", "router-0")])
         self.assertEqual(step_up_handoff["metadata"][ENVELOPE]["causationId"], risk_handoff["messageId"])
         step_up_task_event = self.events("step-up")[0][1]
         self.assertEqual(step_up_task_event["metadata"][ENVELOPE]["causationId"], step_up_handoff["messageId"])

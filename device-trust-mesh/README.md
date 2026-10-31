@@ -10,8 +10,8 @@ The GitOps side (topics, schemas, Flink statements, KubeRay, the `RayService` ma
 |---|---|
 | `dtm/common/` | `envelope` (mesh envelope), `ids` (deterministic ids), `a2a` (A2A v1.0 record builders and validation), `bus` (`AgentBus`, the agents' only Kafka access: A2A Kafka binding, consume allow-list, replay knobs), `kafka` (client settings), `metrics` and `schemas` (vendored schema loaders) |
 | `dtm/simulator/` | Device simulator: device pool bounded by `DEVICE_CAP`, risk scenarios, closed loop on `device.policy-commands` |
-| `dtm/mesh/` | Ray Serve application: `context-mcp` (materializer + FastMCP tools) and the risk, enrolment, step-up, compliance and revocation agents |
-| `schemas/` | Vendored copy of the GitOps repo's generated Avro and A2A JSON Schemas (`SOURCE` records the commit); `scripts/sync_schemas.py` refreshes it |
+| `dtm/mesh/` | Ray Serve application: `context-mcp` (materializer + FastMCP tools); the risk, enrolment, step-up, compliance and revocation agents are added by later stories |
+| `dtm/schemas/` | Vendored copy of the GitOps repo's generated Avro and A2A JSON Schemas (`SOURCE` records the commit), shipped as package data; `scripts/sync_schemas.py` refreshes it |
 | `tests/` | Unit tests |
 
 Agents read business data (device and customer context, risk signals) **only** through `context-mcp`. They use Kafka directly only for A2A agent-to-agent traffic.
@@ -28,7 +28,7 @@ uv venv -p 3.12 .venv && uv pip install -p .venv -e .
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Refresh the vendored schemas from a GitOps checkout, or verify they are current:
+Refresh the vendored schemas in `dtm/schemas/` from a GitOps checkout, or verify they are current:
 
 ```bash
 python3 scripts/sync_schemas.py <gitops-checkout>

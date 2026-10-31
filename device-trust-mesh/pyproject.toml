@@ -17,4 +17,4 @@ dependencies = [
 include = ["dtm*"]
 
 [tool.setuptools.package-data]
-dtm = ["py.typed"]
+dtm = ["py.typed", "schemas/SOURCE", "schemas/avro/*.avsc", "schemas/a2a/*.json"]

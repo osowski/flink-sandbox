@@ -57,6 +57,10 @@ class ConfigTest(unittest.TestCase):
     def test_from_dict_empty_is_defaults(self):
         self.assertEqual(BusConfig.from_dict({}), BusConfig())
 
+    def test_from_dict_rejects_unknown_keys(self):
+        with self.assertRaisesRegex(ValueError, "policyCommand"):
+            BusConfig.from_dict({"policyCommand": "redirect", "topicPrefix": "replay.r1."})
+
     def test_redirect_requires_prefix(self):
         with self.assertRaises(ValueError):
             BusConfig.from_dict({"policyCommands": "redirect", "topicPrefix": ""})
@@ -259,6 +263,18 @@ class SendTest(unittest.TestCase):
         b = bus("risk", BusConfig(topic_prefix="replay.r1."))
         with self.assertLogs("dtm.common.bus", "WARNING"):
             b.reply(inbound(headers={"a2a-reply-topic": "agent.task-events"}), STATUS, key="dev-0001")
+        self.assertEqual(b._producer.records[-1].topic, "replay.r1.agent.task-events")
+
+    def test_reply_ignores_header_naming_another_topic(self):
+        b = bus("risk")
+        with self.assertLogs("dtm.common.bus", "WARNING"):
+            b.reply(inbound(headers={"a2a-reply-topic": "device.policy-commands"}), STATUS, key="dev-0001")
+        self.assertEqual(b._producer.records[-1].topic, "agent.task-events")
+
+    def test_reply_ignores_prefixed_header_naming_another_topic(self):
+        b = bus("risk", BusConfig(topic_prefix="replay.r1."))
+        with self.assertLogs("dtm.common.bus", "WARNING"):
+            b.reply(inbound(headers={"a2a-reply-topic": "replay.r1.agent.cards"}), STATUS, key="dev-0001")
         self.assertEqual(b._producer.records[-1].topic, "replay.r1.agent.task-events")
 
     def test_reply_without_inbound_uses_shared_topic(self):

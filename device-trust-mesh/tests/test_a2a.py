@@ -139,6 +139,15 @@ class CardTest(unittest.TestCase):
         self.assertEqual(c["defaultOutputModes"], ["application/json", "text/plain"])
         self.assertEqual((c["name"], c["version"], c["skills"]), ("risk", "abc123", self.SKILLS))
 
+    def test_card_interface_names_the_request_topic(self):
+        c = agent_card("compliance", "d", self.SKILLS, "v", "b:1", request_topic="agent.tasks.audit")
+        self.assertEqual(c["supportedInterfaces"][0]["url"], "kafka://b:1/agent.tasks.audit")
+
+    def test_card_without_request_topic_has_no_interfaces(self):
+        c = agent_card("compliance", "Audits decisions", self.SKILLS, "v", "b:1", request_topic=None)
+        self.assertEqual(c["supportedInterfaces"], [])
+        validate("agent.cards", c)
+
     def test_card_missing_required_rejected(self):
         c = agent_card("risk", "d", self.SKILLS, "v", "b:1")
         del c["skills"]

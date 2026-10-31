@@ -29,6 +29,20 @@ def produced(bus: AgentBus, topic: str) -> list[tuple[str, dict]]:
             for r in bus._producer.records if r.topic == bus.topic(topic)]
 
 
+def pump(src_bus: AgentBus, topic: str, dst_agent, dst_settings: AgentSettings, *, skip: int = 0) -> int:
+    """Deliver the records ``src_bus`` produced to the logical ``topic`` to ``dst_agent``, skipping the first ``skip``.
+
+    Each record becomes an Inbound as a consumer would see it: the physical topic, partition 0, an increasing
+    offset, the device-id key, the headers the bus wrote and the parsed JSON value. Returns the number of records
+    on the topic so far, to pass as ``skip`` on the next pump of the same topic.
+    """
+    records = [r for r in src_bus._producer.records if r.topic == src_bus.topic(topic)]
+    for offset, record in enumerate(records[skip:], start=skip):
+        dst_agent(Inbound(record.topic, 0, offset, record.key.decode(), record.headers,
+                          json.loads(record.value), 0), dst_settings)
+    return len(records)
+
+
 def request_inbound(topic: str, data: dict, *, task_id: str | None = None, mode: str = "LIVE",
                     replay_run_id: str | None = None, offset: int = 0) -> Inbound:
     """Build a record as the router writes it: a SendMessage request carrying a router-style envelope."""

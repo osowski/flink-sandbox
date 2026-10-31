@@ -18,6 +18,7 @@ from dtm.common.schemas import a2a_validator
 KAFKA_BINDING = "urn:device-trust-mesh:kafka:v1"
 REPLY_TOPIC = "agent.task-events"
 CARDS_TOPIC = "agent.cards"
+SELF_TASK_TOPIC = "agent.tasks.<self>"
 
 _MODES = ["application/json", "text/plain"]
 
@@ -101,16 +102,24 @@ def artifact_update(rpc_id: str, task_id: str, context_id: str, artifact_id: str
     }})
 
 
-def agent_card(name: str, description: str, skills: list[dict], version: str, bootstrap: str) -> dict:
+def agent_card(name: str, description: str, skills: list[dict], version: str, bootstrap: str,
+               request_topic: str | None = SELF_TASK_TOPIC) -> dict:
+    """Return an Agent Card whose interface is ``request_topic``; ``<self>`` in it is the agent name.
+
+    An agent with no request topic (``None``) publishes a card with no supported interfaces.
+    """
+    interfaces = []
+    if request_topic is not None:
+        interfaces.append({
+            "url": f"kafka://{bootstrap}/{request_topic.replace('<self>', name)}",
+            "protocolBinding": KAFKA_BINDING,
+            "protocolVersion": "1.0",
+        })
     return {
         "name": name,
         "description": description,
         "version": version,
-        "supportedInterfaces": [{
-            "url": f"kafka://{bootstrap}/{task_topic(name)}",
-            "protocolBinding": KAFKA_BINDING,
-            "protocolVersion": "1.0",
-        }],
+        "supportedInterfaces": interfaces,
         "capabilities": {"extensions": [{"uri": ENVELOPE_URI}]},
         "defaultInputModes": list(_MODES),
         "defaultOutputModes": list(_MODES),

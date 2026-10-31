@@ -1,11 +1,11 @@
-"""Loaders for the vendored Avro subjects and A2A JSON Schemas."""
+"""Loaders for the vendored Avro subjects and A2A JSON Schemas, shipped as package data under ``dtm/schemas``."""
 import json
 from functools import lru_cache
-from pathlib import Path
+from importlib.resources import files
 
 from jsonschema import Draft202012Validator
 
-SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schemas"
+SCHEMA_DIR = files("dtm") / "schemas"
 
 
 class UnknownSchema(KeyError):
@@ -14,7 +14,7 @@ class UnknownSchema(KeyError):
 
 def _load(kind: str, suffix: str, name: str) -> dict:
     directory = SCHEMA_DIR / kind
-    known = {p.stem for p in directory.glob(f"*{suffix}")}
+    known = {p.name.removesuffix(suffix) for p in directory.iterdir() if p.name.endswith(suffix)}
     if name not in known:
         raise UnknownSchema(f"no {kind} schema named {name!r}")
     return json.loads((directory / f"{name}{suffix}").read_text(encoding="utf-8"))

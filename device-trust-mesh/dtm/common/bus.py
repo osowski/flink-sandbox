@@ -94,10 +94,16 @@ class BusConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "BusConfig":
-        """Build a config from the camelCase keys used in ``agents.yaml``; absent keys keep their defaults."""
+        """Build a config from the camelCase keys used in ``agents.yaml``; absent keys keep their defaults.
+
+        An unknown key raises ``ValueError`` so a misspelt knob never falls back to its default.
+        """
         names = {"mode": "mode", "startPosition": "start_position", "startValue": "start_value",
                  "topicPrefix": "topic_prefix", "policyCommands": "policy_commands",
                  "allowedConsume": "allowed_consume", "replayRunId": "replay_run_id"}
+        unknown = sorted(set(d) - set(names))
+        if unknown:
+            raise ValueError(f"unknown bus keys: {', '.join(map(str, unknown))}; known: {', '.join(names)}")
         values = {field: d[key] for key, field in names.items() if key in d}
         if "allowed_consume" in values:
             values["allowed_consume"] = tuple(values["allowed_consume"])
@@ -277,12 +283,16 @@ class AgentBus:
         self._produce(self._reply_topic(inbound), dumps(record), key, self._a2a_headers(record))
 
     def _reply_topic(self, inbound: Inbound | None) -> str:
-        """Return the topic named by the inbound's reply header, or the shared reply topic when absent or outside the prefix."""
+        """Return the shared reply topic under the configured prefix.
+
+        An inbound reply header is honoured only when it names that topic; any other topic (outside the
+        prefix, or another logical topic such as ``device.policy-commands``) is logged and ignored.
+        """
+        shared = self.topic(REPLY_TOPIC)
         requested = inbound.headers.get("a2a-reply-topic") if inbound is not None else None
-        if requested and not requested.startswith(self.config.topic_prefix):
-            log.warning("ignoring reply topic %s outside prefix %s", requested, self.config.topic_prefix)
-            return self.topic(REPLY_TOPIC)
-        return requested or self.topic(REPLY_TOPIC)
+        if requested and requested != shared:
+            log.warning("ignoring reply topic %s; replies go to %s", requested, shared)
+        return shared
 
     def publish_card(self, card: dict) -> None:
         validate(CARDS_TOPIC, card)

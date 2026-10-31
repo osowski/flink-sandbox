@@ -1,4 +1,5 @@
 import unittest
+from importlib.resources import files
 
 from jsonschema import Draft202012Validator
 
@@ -11,14 +12,22 @@ from dtm.common.schemas import (
 )
 
 
+def stems(kind: str, suffix: str) -> set[str]:
+    return {p.name.removesuffix(suffix) for p in (SCHEMA_DIR / kind).iterdir() if p.name.endswith(suffix)}
+
+
 class SchemasTest(unittest.TestCase):
     def test_all_subjects_vendored(self):
-        subjects = {p.stem for p in (SCHEMA_DIR / "avro").glob("*.avsc")}
+        subjects = stems("avro", ".avsc")
         self.assertEqual(len(subjects), 15)
         self.assertIn("device.events-value", subjects)
-        self.assertEqual({p.stem for p in (SCHEMA_DIR / "a2a").glob("*.json")},
+        self.assertEqual(stems("a2a", ".json"),
             {"agent.cards", "agent.task-events", "agent.tasks.enrolment",
              "agent.tasks.revocation", "agent.tasks.risk", "agent.tasks.step-up"})
+
+    def test_schemas_are_package_resources(self):
+        self.assertEqual(str(SCHEMA_DIR), str(files("dtm") / "schemas"))
+        self.assertTrue((files("dtm") / "schemas" / "SOURCE").is_file())
 
     def test_load_avro_schema_parses(self):
         self.assertEqual(load_avro_schema("device.events-value")["name"], "DeviceEvent")

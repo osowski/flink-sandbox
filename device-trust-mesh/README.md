@@ -10,7 +10,7 @@ The GitOps side (topics, schemas, Flink statements, KubeRay, the `RayService` ma
 |---|---|
 | `dtm/common/` | `envelope` (mesh envelope), `ids` (deterministic ids), `a2a` (A2A v1.0 record builders and validation), `bus` (`AgentBus`, the agents' only Kafka access: A2A Kafka binding, consume allow-list, replay knobs), `kafka` (client settings), `metrics` and `schemas` (vendored schema loaders) |
 | `dtm/simulator/` | Device simulator: device pool bounded by `DEVICE_CAP`, risk scenarios, closed loop on `device.policy-commands` |
-| `dtm/mesh/` | Ray Serve application: `runtime` (`AgentRuntime`: poll loop, hot reload, Agent Card lifecycle), `llm` (`LLMProvider`: Ollama, recorded replay, llm-interactions records), `context-mcp` (materializer + FastMCP tools) and the risk, enrolment, step-up, compliance and revocation agents |
+| `dtm/mesh/` | Ray Serve application: `runtime` (`AgentRuntime`: poll loop, hot reload, Agent Card lifecycle), `llm` (`LLMProvider`: Ollama, recorded replay, llm-interactions records), `context/` (context table, materializer, MCP tools and REST mirror), `context_mcp` (the `dtm.mesh.context_mcp:app` Serve entry point) and the risk, enrolment, step-up, compliance and revocation agents |
 | `schemas/` | Vendored copy of the GitOps repo's generated Avro and A2A JSON Schemas (`SOURCE` records the commit); `scripts/sync_schemas.py` refreshes it |
 | `tests/` | Unit tests |
 
@@ -31,6 +31,15 @@ cd device-trust-mesh
 uv venv -p 3.12 .venv && uv pip install -p .venv -e .
 .venv/bin/python -m unittest discover -s tests
 ```
+
+`context-mcp` serves four MCP tools over streamable HTTP at `/context-mcp/mcp`:
+
+- `get_device_context(device_id, min_seq=None)`: with `min_seq` it waits up to `DTM_CONTEXT_WAIT_TIMEOUT_MS` (default 2000) for that context sequence, then answers `OK`, `STALE` or `NOT_FOUND`.
+- `get_customer_context(customer_id)`
+- `list_risk_signals(device_id, limit=10)`
+- `list_devices(customer_id=None, trust_status=None)`
+
+The same data is mirrored over REST, next to the MCP endpoint: `GET /v1/devices/{device_id}?min_seq=`, `GET /v1/devices?customer_id=&trust_status=`, `GET /v1/customers/{customer_id}`, `GET /v1/devices/{device_id}/signals?limit=`, `GET /healthz` (503 until the materializer has caught up) and `GET /metrics`. Agents call the tools through `dtm.common.context_client.ContextClient`, which retries a `STALE` lookup. The MCP endpoint accepts loopback and `device-trust-mesh-serve-svc` Host headers; `DTM_CONTEXT_ALLOWED_HOSTS` adds more (comma-separated host names).
 
 Refresh the vendored schemas from a GitOps checkout, or verify they are current:
 

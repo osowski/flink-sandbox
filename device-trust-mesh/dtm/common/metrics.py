@@ -49,3 +49,15 @@ MATERIALIZER_SKIPPED = Counter(
     "Context records the materializer could not deserialize or apply and skipped.",
     ["topic"],
 )
+
+CONTEXT_TOOL_LATENCY_MS = Histogram(
+    "dtm_context_tool_latency_ms",
+    "Milliseconds a context-mcp tool call took, including any wait for a context sequence.",
+    ["tool"],
+    buckets=(1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+)
+
+CONTEXT_STALE_TOTAL = Counter(
+    "dtm_context_stale_total",
+    "Device lookups that returned STALE because the requested context sequence was not materialized in time.",
+)

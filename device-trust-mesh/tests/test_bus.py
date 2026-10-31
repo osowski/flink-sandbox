@@ -474,6 +474,19 @@ class LifecycleTest(unittest.TestCase):
         b._consumer.trigger_assign([("agent.tasks.risk", 2)])
         self.assertEqual(b._consumer.paused, [])
 
+    def test_paused_property_follows_pause_and_resume(self):
+        b = bus("risk")
+        self.assertFalse(b.paused)
+        b.pause()
+        self.assertTrue(b.paused)
+        b.resume()
+        self.assertFalse(b.paused)
+
+    def test_rewind_seeks_to_the_inbound_offset(self):
+        b = bus("risk", BusConfig(topic_prefix="replay.r1."))
+        b.rewind(Inbound("replay.r1.agent.tasks.risk", 3, 42, "dev-0001", {}, None, 0))
+        self.assertEqual(b._consumer.seeks, [("replay.r1.agent.tasks.risk", 3, 42)])
+
     def test_close_flushes_and_closes(self):
         b = bus("risk")
         b.close()

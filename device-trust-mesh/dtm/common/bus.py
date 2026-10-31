@@ -321,6 +321,14 @@ class AgentBus:
         if failed:
             raise CommitFailed(f"commit rejected for {failed[0].topic}[{failed[0].partition}]: {failed[0].error}")
 
+    def rewind(self, inbound: Inbound) -> None:
+        """Move the consumer back to ``inbound``'s offset so the record is delivered again."""
+        self._consumer.seek(TopicPartition(inbound.topic, inbound.partition, inbound.offset))
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
     def pause(self) -> None:
         """Pause consumption, including partitions assigned by later rebalances, until ``resume``."""
         self._paused = True

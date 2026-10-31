@@ -10,7 +10,7 @@ The GitOps side (topics, schemas, Flink statements, KubeRay, the `RayService` ma
 |---|---|
 | `dtm/common/` | `envelope` (mesh envelope), `ids` (deterministic ids), `a2a` (A2A v1.0 record builders and validation), `bus` (`AgentBus`, the agents' only Kafka access: A2A Kafka binding, consume allow-list, replay knobs), `kafka` (client settings), `metrics` and `schemas` (vendored schema loaders) |
 | `dtm/simulator/` | Device simulator: device pool bounded by `DEVICE_CAP`, risk scenarios, closed loop on `device.policy-commands` |
-| `dtm/mesh/` | Ray Serve application: `context-mcp` (materializer + FastMCP tools) and the risk, enrolment, step-up, compliance and revocation agents |
+| `dtm/mesh/` | Ray Serve application: `runtime` (`AgentRuntime`: poll loop, hot reload, Agent Card lifecycle), `context-mcp` (materializer + FastMCP tools) and the risk, enrolment, step-up, compliance and revocation agents |
 | `schemas/` | Vendored copy of the GitOps repo's generated Avro and A2A JSON Schemas (`SOURCE` records the commit); `scripts/sync_schemas.py` refreshes it |
 | `tests/` | Unit tests |
 

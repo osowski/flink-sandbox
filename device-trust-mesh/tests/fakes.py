@@ -92,6 +92,7 @@ class FakeConsumer:
         self.subscribed: list[str] | None = None
         self.assigned: list[TopicPartition] = []
         self.paused: list[TopicPartition] = []
+        self.seeks: list[tuple[str, int, int]] = []
         self.committed_offsets: dict[tuple[str, int], int] = {}
         self.committed_errors: dict[tuple[str, int], str] = {}
         self.committed = CommitLog(self.committed_offsets, self.committed_errors)
@@ -150,6 +151,9 @@ class FakeConsumer:
 
     def resume(self, partitions):
         self.paused = []
+
+    def seek(self, partition):
+        self.seeks.append((partition.topic, partition.partition, partition.offset))
 
     def get_watermark_offsets(self, partition, timeout=None, cached=False):
         return self.watermarks.get((partition.topic, partition.partition), (0, 0))

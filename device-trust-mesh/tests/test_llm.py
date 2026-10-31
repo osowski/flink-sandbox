@@ -156,6 +156,10 @@ class RequestHashTest(unittest.TestCase):
         self.assertEqual(request_hash(REQ), request_hash(reordered))
         self.assertEqual(request_hash(REQ), request_hash(dataclasses.replace(REQ, timeout_ms=1)))
 
+    def test_request_hash_changes_with_schema_only(self):
+        edited = dataclasses.replace(REQ, schema={**SCHEMA, "required": ["score"]})
+        self.assertNotEqual(request_hash(REQ), request_hash(edited))
+
     def test_request_hash_is_sha256_hex(self):
         self.assertRegex(request_hash(REQ), r"^[0-9a-f]{64}$")
 
@@ -167,6 +171,25 @@ class RecordedProviderTest(unittest.TestCase):
         self.assertEqual((hit.status, hit.content["score"]), ("OK", 1))
         miss = p.complete(dataclasses.replace(REQ, model="x"))
         self.assertEqual((miss.status, miss.error, miss.content), ("ERROR", "no recording", None))
+
+    def test_recording_violating_request_schema_is_error(self):
+        p = RecordedProvider({request_hash(REQ): {"content": {"score": 400, "rationale": "r"}}})
+        r = p.complete(REQ)
+        self.assertEqual((r.status, r.content), ("ERROR", None))
+        self.assertIn("schema", r.error)
+
+    def test_malformed_recording_is_error(self):
+        h = request_hash(REQ)
+        for rec in ({}, {"content": "text"}, {"content": None}, {"content": [1]}, None, "x"):
+            with self.subTest(rec=rec):
+                r = RecordedProvider({h: rec}).complete(REQ)
+                self.assertEqual((r.status, r.content), ("ERROR", None))
+                self.assertIn("malformed", r.error)
+
+    def test_recording_for_old_schema_is_a_miss(self):
+        p = RecordedProvider({request_hash(REQ): {"content": {"score": 1, "rationale": "r"}}})
+        r = p.complete(dataclasses.replace(REQ, schema={**SCHEMA, "required": ["score"]}))
+        self.assertEqual((r.status, r.error), ("ERROR", "no recording"))
 
     def test_recording_carries_tokens_and_raw(self):
         rec = {"content": {"score": 1, "rationale": "r"}, "raw": OK_BODY,

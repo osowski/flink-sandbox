@@ -50,7 +50,7 @@ def request_hash(req: LLMRequest) -> str:
     """SHA-256 over the canonical JSON of the fields that determine a completion."""
     canonical = json.dumps(
         {"provider": req.provider, "model": req.model, "options": req.options,
-         "messages": req.messages, "input_message_id": req.input_message_id},
+         "messages": req.messages, "schema": req.schema, "input_message_id": req.input_message_id},
         sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -116,16 +116,26 @@ class OpenAICompatibleProvider:
 
 
 class RecordedProvider:
-    """Replays recorded completions keyed by ``request_hash``; a miss is an ``ERROR``."""
+    """Replays recorded completions keyed by ``request_hash``.
+
+    A miss, a malformed recording, or recorded content that violates the request schema is an ``ERROR``.
+    """
 
     def __init__(self, recordings: Mapping[str, dict]):
         self._recordings = recordings
 
     def complete(self, req: LLMRequest) -> LLMResponse:
-        rec = self._recordings.get(request_hash(req))
-        if rec is None:
+        key = request_hash(req)
+        if key not in self._recordings:
             return LLMResponse(ERROR, None, None, 0, error="no recording")
-        return LLMResponse(OK, rec["content"], rec.get("raw"), 0,
+        rec = self._recordings[key]
+        content = rec.get("content") if isinstance(rec, Mapping) else None
+        if not isinstance(content, dict):
+            return LLMResponse(ERROR, None, None, 0, error="malformed recording")
+        problem = _first_schema_error(req.schema, content)
+        if problem is not None:
+            return LLMResponse(ERROR, None, None, 0, error=f"recording violates schema: {problem}")
+        return LLMResponse(OK, content, rec.get("raw"), 0,
                            rec.get("prompt_tokens"), rec.get("completion_tokens"))
 
 

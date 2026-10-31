@@ -155,6 +155,8 @@ class ContextTable:
                   "severity": value["severity"], "detail": value["detail"],
                   "source_event_type": value["source_event_type"],
                   "event_time": to_epoch_ms(value["envelope"]["event_time"])}
+        if type(signal["event_time"]) is not int:
+            raise ValueError(f"risk signal {signal['signal_id']!r} has no event_time")
         seen = self._signal_ids.setdefault(device_id, set())
         if signal["signal_id"] in seen:
             return

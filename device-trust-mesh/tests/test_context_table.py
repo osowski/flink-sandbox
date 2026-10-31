@@ -224,6 +224,33 @@ class ContextTableTest(unittest.TestCase):
         self.assertNotIn("s-0", got)
         self.assertEqual(got.index("mid"), got.index("s-25") - 1)
 
+    def test_signal_without_event_time_changes_no_state(self):
+        for prior in (0, 3):
+            with self.subTest(prior=prior):
+                t = ContextTable(20)
+                for i in range(prior):
+                    t.apply("device.risk-signals", 0, i, None,
+                            signal(f"p-{i}", "dev-0001", event_time=at(i)), i)
+                before = t.list_risk_signals("dev-0001", limit=100)
+                offsets = t.offsets()
+                with self.assertRaises(ValueError):
+                    t.apply("device.risk-signals", 0, 99, None,
+                            signal("bad", "dev-0001", event_time=None), 99)
+                self.assertEqual(t.list_risk_signals("dev-0001", limit=100), before)
+                self.assertEqual(t.offsets(), offsets)
+                t.apply("device.risk-signals", 0, 100, None,
+                        signal("bad", "dev-0001", event_time=at(50)), 100)
+                self.assertEqual(t.list_risk_signals("dev-0001")[0]["signal_id"], "bad")
+                self.assertEqual(len(t.list_risk_signals("dev-0001", limit=100)), prior + 1)
+
+    def test_equal_event_times_keep_arrival_order(self):
+        t = ContextTable(20)
+        for i in range(3):
+            t.apply("device.risk-signals", 0, i, None,
+                    signal(f"s-{i}", "dev-0001", event_time=at(5)), i)
+        self.assertEqual([s["signal_id"] for s in t.list_risk_signals("dev-0001")],
+                         ["s-2", "s-1", "s-0"])
+
     def test_malformed_device_record_keeps_the_existing_row(self):
         t = ContextTable(20)
         put(t, "dev-0001", ctx(5))

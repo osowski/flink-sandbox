@@ -36,3 +36,16 @@ DEVICE_CAP_EXCEEDED = Gauge(
     "dtm_device_cap_exceeded",
     "1 once the number of distinct device ids seen on device.context exceeds the configured cap.",
 )
+
+MATERIALIZATION_LAG_MS = Histogram(
+    "dtm_materialization_lag_ms",
+    "Milliseconds from a context record's Kafka timestamp to its application to the context table.",
+    ["topic"],
+    buckets=(5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000),
+)
+
+MATERIALIZER_SKIPPED = Counter(
+    "dtm_materializer_skipped_total",
+    "Context records the materializer could not deserialize or apply and skipped.",
+    ["topic"],
+)

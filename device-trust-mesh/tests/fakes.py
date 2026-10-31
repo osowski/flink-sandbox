@@ -105,6 +105,7 @@ class FakeConsumer:
         self.lookup_timeouts: list[float | None] = []
         self.watermarks: dict[tuple[str, int], tuple[int, int]] = {}
         self.partition_counts: dict[str, int] = {}
+        self.positions: dict[tuple[str, int], int] = {}
         self._queue: list[FakeMessage] = []
         self._on_assign = None
 
@@ -163,6 +164,10 @@ class FakeConsumer:
 
     def get_watermark_offsets(self, partition, timeout=None, cached=False):
         return self.watermarks.get((partition.topic, partition.partition), (0, 0))
+
+    def position(self, partitions):
+        return [_tp(p.topic, p.partition, self.positions.get((p.topic, p.partition), OFFSET_INVALID))
+                for p in partitions]
 
     def list_topics(self, topic=None, timeout=None):
         names = [topic] if topic else list(self.partition_counts)

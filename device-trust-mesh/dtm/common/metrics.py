@@ -1,5 +1,5 @@
 """Prometheus metrics shared across the mesh."""
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 HOP_LATENCY_MS = Histogram(
     "dtm_hop_latency_ms",
@@ -25,4 +25,14 @@ LLM_LATENCY_MS = Histogram(
     "Milliseconds spent in one LLM completion call, by agent, model and outcome status.",
     ["agent", "model", "status"],
     buckets=(50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000),
+)
+
+TRACKED_DEVICES = Gauge(
+    "dtm_tracked_devices",
+    "Device rows currently held in the context table.",
+)
+
+DEVICE_CAP_EXCEEDED = Gauge(
+    "dtm_device_cap_exceeded",
+    "1 once the number of distinct device ids seen on device.context exceeds the configured cap.",
 )

@@ -30,26 +30,33 @@ class ComplianceAgent:
         self._bus = bus
         self._clock = clock
         self._seen_limit = seen_limit
-        self._seen: OrderedDict[str, None] = OrderedDict()
+        self._seen: OrderedDict[str, tuple[str, int, int]] = OrderedDict()
 
     def describe(self, settings: AgentSettings) -> tuple[str, list[dict]]:
         return _DESCRIPTION, _SKILLS
 
     def __call__(self, inbound: Inbound, settings: AgentSettings) -> None:
         event = parse_task_event(self._bus, inbound)
-        if event is None or not self._auditable(event):
+        if event is None or not self._auditable(event, inbound):
             return
         outputs = Outputs(self._bus, self.name, settings, event, clock=self._clock, own_rpc_ids=True)
         task_id = outputs.new_task_id()
         run_task(outputs, task_id, lambda: self._audit(outputs, task_id, event))
 
-    def _auditable(self, event: TaskEvent) -> bool:
-        """Accept an artifact event other than an audit record or the agent's own, once per ``messageId``."""
+    def _auditable(self, event: TaskEvent, inbound: Inbound) -> bool:
+        """Accept an artifact event other than an audit record or the agent's own, once per ``messageId``.
+
+        A ``messageId`` is skipped only when it was seen in a different record. The same record delivered
+        again is a retry of an audit that was not committed, and auditing it again reproduces the same ids.
+        """
         if event.kind != "artifactUpdate" or event.artifact_name == AUDIT_RECORD:
             return False
-        if event.envelope.agent_id == f"{_AGENT_PREFIX}{self.name}" or event.message_id in self._seen:
+        if event.envelope.agent_id == f"{_AGENT_PREFIX}{self.name}":
             return False
-        self._seen[event.message_id] = None
+        position = (inbound.topic, inbound.partition, inbound.offset)
+        if self._seen.get(event.message_id, position) != position:
+            return False
+        self._seen[event.message_id] = position
         if len(self._seen) > self._seen_limit:
             self._seen.popitem(last=False)
         return True

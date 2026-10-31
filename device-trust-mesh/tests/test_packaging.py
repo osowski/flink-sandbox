@@ -7,7 +7,7 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 PACKAGED = ("dtm/schemas/avro/device.events-value.avsc", "dtm/schemas/a2a/agent.tasks.risk.json",
-            "dtm/schemas/SOURCE", "dtm/py.typed")
+            "dtm/prompts/risk.v1", "dtm/schemas/SOURCE", "dtm/py.typed")
 
 
 @unittest.skipIf(shutil.which("uv") is None, "uv is not installed; it is the only wheel builder in the dev env")

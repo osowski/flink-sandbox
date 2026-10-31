@@ -12,7 +12,7 @@ import httpx
 from mcp.client.client import Client
 
 from dtm.common.metrics import CONTEXT_STALE_TOTAL, CONTEXT_TOOL_LATENCY_MS
-from dtm.mesh.context.server import allowed_hosts, build_api, build_mcp
+from dtm.mesh.context.server import THREAD_LIMITER, allowed_hosts, build_api, build_mcp
 from dtm.mesh.context.state import ContextState
 from dtm.mesh.context.table import ContextTable
 
@@ -178,6 +178,23 @@ class ContextServerTest(unittest.IsolatedAsyncioTestCase):
             with self.assertLogs("mcp.server.transport_security", "WARNING"):
                 self.assertEqual(await status("evil.example.com"), 421)
 
+    async def test_mcp_endpoint_without_trailing_slash_does_not_redirect(self):
+        app = api_for()
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        headers = {"accept": "application/json, text/event-stream"}
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app),
+                                         base_url="http://127.0.0.1") as h:
+                for path in ("/mcp", "/mcp/"):
+                    with self.subTest(path=path):
+                        r = await h.post(path, json=body, headers=headers)
+                        self.assertEqual(r.status_code, 200)
+                        self.assertIn("get_device_context",
+                                      {t["name"] for t in r.json()["result"]["tools"]})
+
+    def test_thread_limiter_matches_max_ongoing_requests(self):
+        self.assertEqual(THREAD_LIMITER.total_tokens, 32)
+
     def test_extra_allowed_hosts_from_env(self):
         with mock.patch.dict(os.environ, {"DTM_CONTEXT_ALLOWED_HOSTS": "mcp.example.test, other"}):
             hosts = allowed_hosts()
@@ -192,7 +209,82 @@ class ContextServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ContextState(seeded_table(), None, 10).ready())
 
 
+class StateEnvTest(unittest.TestCase):
+    def test_missing_device_cap_is_a_clear_error(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "DEVICE_CAP"):
+                ContextState.from_env()
+
+    def test_non_integer_device_cap_is_a_clear_error(self):
+        with mock.patch.dict(os.environ, {"DEVICE_CAP": "lots"}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "DEVICE_CAP.*'lots'"):
+                ContextState.from_env()
+
+    def test_check_alive_raises_once_the_materializer_thread_has_died(self):
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        state = ContextState(seeded_table(), ReadyStub(True), 10, materializer_thread=dead)
+        with self.assertRaisesRegex(RuntimeError, "materializer"):
+            state.check_alive()
+
+    def test_check_alive_passes_for_a_live_or_absent_thread(self):
+        stop = threading.Event()
+        live = threading.Thread(target=stop.wait)
+        live.start()
+        try:
+            ContextState(seeded_table(), ReadyStub(True), 10, materializer_thread=live).check_alive()
+            ContextState(seeded_table(), ReadyStub(True), 10).check_alive()
+        finally:
+            stop.set()
+            live.join()
+
+
+def serve_module():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # ray.serve import emits its own pydantic deprecations
+        import dtm.mesh.context_mcp as m
+    return m
+
+
 class ServeAppTest(unittest.TestCase):
+    def test_deployment_allows_enough_ongoing_requests_for_waiting_lookups(self):
+        self.assertEqual(serve_module().ContextMcp.max_ongoing_requests, 32)
+
+    def test_check_health_raises_when_the_materializer_thread_died(self):
+        m = serve_module()
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        check_health = m.ContextMcp.func_or_class.check_health
+        state = ContextState(seeded_table(), ReadyStub(True), 10, materializer_thread=dead)
+        with mock.patch.object(m, "get_state", return_value=state):
+            with self.assertRaisesRegex(RuntimeError, "materializer"):
+                check_health(None)
+        with mock.patch.object(m, "get_state",
+                               return_value=ContextState(seeded_table(), ReadyStub(True), 10)):
+            check_health(None)
+
+    def test_ready_wait_gives_up_early_when_the_materializer_thread_dies(self):
+        m = serve_module()
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        state = ContextState(seeded_table(), ReadyStub(False), 10, materializer_thread=dead)
+        t0 = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "materializer"):
+            m.wait_until_ready(state, timeout_s=30)
+        self.assertLess(time.monotonic() - t0, 2)
+
+    def test_ready_wait_times_out(self):
+        m = serve_module()
+        with self.assertRaisesRegex(RuntimeError, "not caught up"):
+            m.wait_until_ready(ContextState(seeded_table(), ReadyStub(False), 10), timeout_s=0.1)
+
+    def test_ready_wait_returns_once_ready(self):
+        serve_module().wait_until_ready(ContextState(seeded_table(), ReadyStub(True), 10),
+                                        timeout_s=0.1)
+
     def test_serve_app_import_path(self):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # ray.serve import emits its own pydantic deprecations

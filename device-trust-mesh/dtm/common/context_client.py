@@ -57,6 +57,8 @@ class ContextClient:
             raise RuntimeError(f"context tool {tool} failed: {text}")
         if result.structured_content is not None:
             return _unwrap(result.structured_content)
+        if not text:
+            raise RuntimeError(f"context tool {tool} returned no content")
         return json.loads(text)
 
 

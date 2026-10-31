@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from functools import partial
 
+import anyio
 import anyio.to_thread
 from fastapi import FastAPI, Response
 from mcp.server.mcpserver import MCPServer
@@ -19,6 +20,11 @@ from dtm.mesh.context.state import ContextState
 from dtm.mesh.context.table import ContextTable
 
 SERVER_NAME = "context-mcp"
+
+# Matches the Serve deployment's max_ongoing_requests, so every admitted request that waits on a
+# context sequence has a worker thread and none queues behind the others.
+MAX_CONCURRENT_LOOKUPS = 32
+THREAD_LIMITER = anyio.CapacityLimiter(MAX_CONCURRENT_LOOKUPS)
 
 _SERVE_SERVICE = "device-trust-mesh-serve-svc"
 _SERVE_NAMESPACE = "device-trust-mesh"
@@ -41,7 +47,7 @@ def allowed_hosts() -> list[str]:
 async def _timed(tool: str, fn, *args, **kwargs):
     start = time.monotonic()
     try:
-        return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
+        return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs), limiter=THREAD_LIMITER)
     finally:
         CONTEXT_TOOL_LATENCY_MS.labels(tool).observe((time.monotonic() - start) * 1000)
 
@@ -80,6 +86,18 @@ def build_mcp(table: ContextTable, wait_timeout_ms: int = 2000) -> MCPServer:
     return mcp
 
 
+class _TrailingSlash:
+    """ASGI wrapper that serves ``/mcp`` as ``/mcp/`` so the mount answers without a redirect."""
+
+    def __init__(self, app):
+        self._app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket") and scope["path"] == "/mcp":
+            scope = {**scope, "path": "/mcp/", "raw_path": b"/mcp/"}
+        await self._app(scope, receive, send)
+
+
 def build_api(state: ContextState) -> FastAPI:
     mcp = build_mcp(state.table, state.wait_timeout_ms)
     # Host validation stays on; callers reach the endpoint by the Serve Service's cluster DNS name.
@@ -96,6 +114,7 @@ def build_api(state: ContextState) -> FastAPI:
             yield
 
     api = FastAPI(lifespan=lifespan)
+    api.add_middleware(_TrailingSlash)
     api.mount("/mcp", mcp_app)
 
     @api.get("/v1/devices/{device_id}/signals")

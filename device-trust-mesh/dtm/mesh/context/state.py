@@ -14,18 +14,29 @@ class ContextState:
     table: ContextTable
     materializer: Materializer | None
     wait_timeout_ms: int
+    materializer_thread: threading.Thread | None = None
 
     def ready(self) -> bool:
         return self.materializer is None or self.materializer.ready.is_set()
 
+    def check_alive(self) -> None:
+        """Raise when the materializer thread has stopped, since the table would no longer advance."""
+        if self.materializer_thread is not None and not self.materializer_thread.is_alive():
+            raise RuntimeError("context materializer thread is no longer running")
+
     @classmethod
     def from_env(cls) -> "ContextState":
         """Build the table from ``DEVICE_CAP`` and start the materializer that fills it."""
-        table = ContextTable(int(os.environ["DEVICE_CAP"]))
+        raw_cap = os.environ.get("DEVICE_CAP")
+        try:
+            device_cap = int(raw_cap)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"DEVICE_CAP must be set to an integer, got {raw_cap!r}") from None
+        table = ContextTable(device_cap)
         wait_timeout_ms = int(os.environ.get("DTM_CONTEXT_WAIT_TIMEOUT_MS", _DEFAULT_WAIT_TIMEOUT_MS))
         materializer = Materializer.connect(table)
-        materializer.start()
-        return cls(table, materializer, wait_timeout_ms)
+        thread = materializer.start()
+        return cls(table, materializer, wait_timeout_ms, thread)
 
 
 _state: ContextState | None = None

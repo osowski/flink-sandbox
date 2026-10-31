@@ -87,6 +87,21 @@ class ContextClientTest(unittest.IsolatedAsyncioTestCase):
                 await cc.get_device_context("dev-0001", min_seq="not-an-int")
         self.assertIn("get_device_context", str(e.exception))
 
+    async def test_empty_result_raises_naming_the_tool(self):
+        class Empty:
+            is_error = False
+            structured_content = None
+            content = []
+
+        class Stub:
+            async def call_tool(self, tool, args):
+                return Empty()
+
+        cc = ContextClient(build_mcp(seeded_table()))
+        cc._client = Stub()
+        with self.assertRaisesRegex(RuntimeError, "get_customer_context"):
+            await cc.get_customer_context("cust-001")
+
     async def test_use_outside_context_raises(self):
         with self.assertRaises(RuntimeError):
             await ContextClient(build_mcp(seeded_table())).list_devices()

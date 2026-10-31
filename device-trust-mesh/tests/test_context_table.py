@@ -22,10 +22,14 @@ def customer_ctx(**over):
             "last_country": "US", "last_event_time": EVENT_TIME, **over}
 
 
-def signal(signal_id, device_id, severity="HIGH"):
-    return {"envelope": {"device_id": device_id, "event_time": EVENT_TIME}, "signal_id": signal_id,
+def signal(signal_id, device_id, severity="HIGH", event_time=EVENT_TIME):
+    return {"envelope": {"device_id": device_id, "event_time": event_time}, "signal_id": signal_id,
             "signal_type": "IMPOSSIBLE_TRAVEL", "severity": severity, "detail": "d",
             "source_event_type": "LOGIN"}
+
+
+def at(offset_ms):
+    return datetime.fromtimestamp((EVENT_MS + offset_ms) / 1000, tz=timezone.utc)
 
 
 def put(t, device_id, value, offset=0, partition=0):
@@ -170,6 +174,65 @@ class ContextTableTest(unittest.TestCase):
         self.assertEqual(got[-1]["signal_id"], "s-10")
         self.assertEqual([s["signal_id"] for s in t.list_risk_signals("dev-0001", limit=3)],
                          ["s-59", "s-58", "s-57"])
+
+    def test_replay_of_an_evicted_signal_leaves_the_window_unchanged(self):
+        t = ContextTable(20)
+        for i in range(60):
+            t.apply("device.risk-signals", 0, i, None,
+                    signal(f"s-{i}", "dev-0001", event_time=at(i)), i)
+        before = t.list_risk_signals("dev-0001", limit=100)
+        for i in range(10):
+            t.apply("device.risk-signals", 1, i, None,
+                    signal(f"s-{i}", "dev-0001", event_time=at(i)), i)
+        self.assertEqual(t.list_risk_signals("dev-0001", limit=100), before)
+        self.assertEqual(before[0]["signal_id"], "s-59")
+        self.assertEqual(before[-1]["signal_id"], "s-10")
+        self.assertEqual(t.offsets()[("device.risk-signals", 1)], 9)
+
+    def test_out_of_order_older_signal_lands_in_event_time_position(self):
+        t = ContextTable(20)
+        for i, n in enumerate((10, 30, 20)):
+            t.apply("device.risk-signals", 0, i, None,
+                    signal(f"s-{n}", "dev-0001", event_time=at(n)), i)
+        self.assertEqual([s["signal_id"] for s in t.list_risk_signals("dev-0001")],
+                         ["s-30", "s-20", "s-10"])
+
+    def test_full_window_ignores_a_signal_older_than_its_oldest(self):
+        t = ContextTable(20)
+        for i in range(SIGNALS_PER_DEVICE):
+            t.apply("device.risk-signals", 0, i, None,
+                    signal(f"s-{i}", "dev-0001", event_time=at(100 + i)), i)
+        t.apply("device.risk-signals", 0, 50, None,
+                signal("old", "dev-0001", event_time=at(1)), 50)
+        got = t.list_risk_signals("dev-0001", limit=100)
+        self.assertEqual(len(got), SIGNALS_PER_DEVICE)
+        self.assertNotIn("old", [s["signal_id"] for s in got])
+        self.assertEqual(t.offsets()[("device.risk-signals", 0)], 50)
+        t.apply("device.risk-signals", 0, 51, None,
+                signal("old", "dev-0001", event_time=at(1000)), 51)
+        self.assertNotIn("old", [s["signal_id"] for s in t.list_risk_signals("dev-0001", limit=100)])
+
+    def test_full_window_drops_oldest_for_a_mid_window_signal(self):
+        t = ContextTable(20)
+        for i in range(SIGNALS_PER_DEVICE):
+            t.apply("device.risk-signals", 0, i, None,
+                    signal(f"s-{i}", "dev-0001", event_time=at(100 + 2 * i)), i)
+        t.apply("device.risk-signals", 0, 50, None,
+                signal("mid", "dev-0001", event_time=at(151)), 50)
+        got = [s["signal_id"] for s in t.list_risk_signals("dev-0001", limit=100)]
+        self.assertEqual(len(got), SIGNALS_PER_DEVICE)
+        self.assertNotIn("s-0", got)
+        self.assertEqual(got.index("mid"), got.index("s-25") - 1)
+
+    def test_malformed_device_record_keeps_the_existing_row(self):
+        t = ContextTable(20)
+        put(t, "dev-0001", ctx(5))
+        bad = {k: v for k, v in ctx(6).items() if k != "platform"}
+        with self.assertRaises(KeyError):
+            put(t, "dev-0001", bad, offset=1)
+        self.assertEqual(t.get_device("dev-0001")["device"]["context_seq"], 5)
+        self.assertEqual([d["device_id"] for d in t.list_devices("cust-001")], ["dev-0001"])
+        self.assertEqual(t.offsets(), {("device.context", 0): 0})
 
     def test_risk_signal_row_shape(self):
         t = ContextTable(20)

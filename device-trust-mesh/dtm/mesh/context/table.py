@@ -6,7 +6,7 @@ materialized wakes as soon as ``apply`` lands it and never holds the lock while 
 import logging
 import threading
 import time
-from collections import deque
+from bisect import bisect_right
 from typing import Callable
 
 from dtm.common.envelope import to_epoch_ms
@@ -34,7 +34,7 @@ class ContextTable:
         self._devices: dict[str, dict] = {}
         self._customers: dict[str, dict] = {}
         self._devices_by_customer: dict[str, set[str]] = {}
-        self._signals: dict[str, deque] = {}
+        self._signals: dict[str, list[dict]] = {}
         self._signal_ids: dict[str, set[str]] = {}
         self._seen_device_ids: set[str] = set()
         self._offsets: dict[tuple[str, int], int] = {}
@@ -116,6 +116,10 @@ class ContextTable:
                                   for (t, p), o in sorted(self._offsets.items())]}
 
     def _apply_device(self, device_id: str, value: dict | None) -> None:
+        row = None
+        if value is not None:
+            row = {"device_id": device_id, **{f: value[f] for f in _DEVICE_FIELDS},
+                   "last_event_time": to_epoch_ms(value["last_event_time"])}
         self._seen_device_ids.add(device_id)
         if len(self._seen_device_ids) > self._device_cap:
             DEVICE_CAP_EXCEEDED.set(1)
@@ -130,9 +134,7 @@ class ContextTable:
                 members.discard(device_id)
                 if not members:
                     del self._devices_by_customer[old["customer_id"]]
-        if value is not None:
-            row = {"device_id": device_id, **{f: value[f] for f in _DEVICE_FIELDS},
-                   "last_event_time": to_epoch_ms(value["last_event_time"])}
+        if row is not None:
             self._devices[device_id] = row
             if row["customer_id"] is not None:
                 self._devices_by_customer.setdefault(row["customer_id"], set()).add(device_id)
@@ -149,14 +151,19 @@ class ContextTable:
 
     def _apply_signal(self, value: dict) -> None:
         device_id = value["envelope"]["device_id"]
-        ids = self._signal_ids.setdefault(device_id, set())
-        if value["signal_id"] in ids:
+        signal = {"signal_id": value["signal_id"], "signal_type": value["signal_type"],
+                  "severity": value["severity"], "detail": value["detail"],
+                  "source_event_type": value["source_event_type"],
+                  "event_time": to_epoch_ms(value["envelope"]["event_time"])}
+        seen = self._signal_ids.setdefault(device_id, set())
+        if signal["signal_id"] in seen:
             return
-        signals = self._signals.setdefault(device_id, deque(maxlen=SIGNALS_PER_DEVICE))
-        if len(signals) == signals.maxlen:
-            ids.discard(signals[0]["signal_id"])
-        ids.add(value["signal_id"])
-        signals.append({"signal_id": value["signal_id"], "signal_type": value["signal_type"],
-                        "severity": value["severity"], "detail": value["detail"],
-                        "source_event_type": value["source_event_type"],
-                        "event_time": to_epoch_ms(value["envelope"]["event_time"])})
+        seen.add(signal["signal_id"])
+        window = self._signals.setdefault(device_id, [])
+        position = bisect_right(window, signal["event_time"], key=lambda s: s["event_time"])
+        if len(window) >= SIGNALS_PER_DEVICE:
+            if position == 0:
+                return
+            del window[0]
+            position -= 1
+        window.insert(position, signal)

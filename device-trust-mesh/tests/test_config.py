@@ -44,11 +44,23 @@ class TempRoot(unittest.TestCase):
             doc["agents"].update(edits["agents"])
         (self.root / "agents.yaml").write_text(yaml.safe_dump(doc))
 
+    def write_agents_text(self, extra: str) -> None:
+        """Write the fixture's agents.yaml with its ``context`` block replaced by ``extra`` (YAML text)."""
+        text = (FIXTURE / "agents.yaml").read_text()
+        head = text[:text.index("context:")]
+        (self.root / "agents.yaml").write_text(head + extra)
+
     def load_with(self, risk_prompt=None, **edits):
         self.edit_agents(**edits)
         if risk_prompt is not None:
             (self.root / "prompts" / "risk.v1").write_text(risk_prompt)
         return self.src().load()
+
+
+UNVERSIONABLE = {
+    "unquoted date": "context:\n  since: 2026-10-31\n",
+    "mixed-type keys": "context:\n  1: a\n  b: c\n",
+}
 
 
 class LoadTests(TempRoot):
@@ -119,6 +131,13 @@ class LoadTests(TempRoot):
         (self.root / "agents.yaml").write_text("llm: [unclosed")
         with self.assertRaises(ConfigError):
             self.src().load()
+
+    def test_unversionable_values_are_config_errors(self):
+        for name, text in UNVERSIONABLE.items():
+            with self.subTest(name):
+                self.write_agents_text(text)
+                with self.assertRaises(ConfigError):
+                    self.src().load()
 
     def test_missing_agents_yaml_is_config_error(self):
         (self.root / "agents.yaml").unlink()
@@ -206,6 +225,18 @@ class RefreshTests(TempRoot):
             self.assertIsNone(s.refresh())
         (self.root / "agents.yaml").write_text(good_yaml + "# touched\n")
         self.assertIsNotNone(s.refresh())
+
+    def test_refresh_keeps_last_good_on_unversionable_values(self):
+        for name, text in UNVERSIONABLE.items():
+            with self.subTest(name):
+                s = self.src()
+                good = s.load()
+                self.write_agents_text(text)
+                with self.assertLogs("dtm.common.config", logging.ERROR):
+                    self.assertIsNone(s.refresh())
+                (self.root / "agents.yaml").write_text((FIXTURE / "agents.yaml").read_text())
+                self.assertIsNone(s.refresh())
+                self.assertEqual(s.load().digest, good.digest)
 
     def test_refresh_without_prior_load_loads(self):
         self.assertIsNotNone(self.src().refresh())

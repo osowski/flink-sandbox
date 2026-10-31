@@ -2,7 +2,9 @@
 
 The files come from projected ConfigMap volumes, which Kubernetes updates by swapping a ``..data``
 symlink. Every read goes through the resolved path, and a single snapshot of the bytes feeds both the
-content digest and the parsed config, so a swap in the middle of a read cannot produce a mixed result.
+content digest and the parsed config, so each file is read consistently. A swap between reading
+``agents.yaml`` and the prompts can pair files from different generations; that config carries the digest
+of what was read, and the next refresh sees the settled files as a new digest.
 """
 import copy
 import hashlib
@@ -141,8 +143,11 @@ class FileConfigSource:
     @staticmethod
     def config_version(agent: dict, llm: dict, bus: dict, context: dict, prompt_text: str | None) -> str:
         """First 12 hex digits of the SHA-256 over everything that shapes an agent's behaviour."""
-        canonical = json.dumps({"agent": agent, "llm": llm, "bus": bus, "context": context, "prompt": prompt_text},
-                               sort_keys=True, separators=(",", ":"))
+        try:
+            canonical = json.dumps({"agent": agent, "llm": llm, "bus": bus, "context": context, "prompt": prompt_text},
+                                   sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError) as e:
+            raise ConfigError(f"configuration contains values that cannot be versioned: {e}") from e
         return hashlib.sha256(canonical.encode()).hexdigest()[:_VERSION_LENGTH]
 
     def _snapshot(self) -> _Snapshot:

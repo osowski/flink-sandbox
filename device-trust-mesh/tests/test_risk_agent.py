@@ -1,5 +1,6 @@
 import importlib.resources
 import unittest
+from unittest import mock
 
 from agent_fakes import RISK_REQUEST, ScriptedProvider, context_table, make_bus, produced, request_inbound, settings
 from dtm.common import a2a, ids
@@ -65,6 +66,15 @@ class RiskAgentTest(unittest.TestCase):
                           "llmInteractionId": interactions[0][1]["envelope"]["message_id"]})
         self.assertEqual(message["referenceTaskIds"], [ids.task_id("agent:risk", "router-0")])
         self.assertEqual(message["parts"][1]["text"], "Decide enrolment for dev-0001 (risk 72)")
+
+    def test_failed_handoff_leaves_failed_as_the_only_terminal_state(self):
+        agent = self.agent(ScriptedProvider(scored()))
+        with mock.patch.object(self.bus, "send", side_effect=RuntimeError("producer down")), \
+                self.assertLogs("dtm.mesh.agents.kit", "ERROR"):
+            self.run_request(agent)
+        self.assertEqual(self.states(), [SUBMITTED, WORKING, "risk-assessment", FAILED])
+        self.assertEqual(self.events()[-1][1]["status"]["message"]["parts"][0]["text"],
+                         "RuntimeError: producer down")
 
     def test_every_output_is_caused_by_the_inbound_message(self):
         self.run_request(self.agent(ScriptedProvider(scored())))

@@ -70,9 +70,9 @@ class RiskAgent:
                          {"score": score, "rationale": rationale, "signalIds": signal_ids,
                           "asOf": {key: as_of[key] for key in ("contextSeq", "materializedAt", "sourceOffsets")}},
                          f"Risk {score}/100: {rationale}")
-        outputs.status(task_id, COMPLETED)
         outputs.send("enrolment",
                      {"taskType": "DECIDE_ENROLMENT", "deviceId": device_id, "customerId": customer_id,
                       "riskAssessment": {"score": score, "rationale": rationale, "signalIds": signal_ids,
                                          "llmInteractionId": interaction_id}},
                      f"Decide enrolment for {device_id} (risk {score})", reference_task_ids=[task_id])
+        outputs.status(task_id, COMPLETED)

@@ -92,16 +92,20 @@ class FakeConsumer:
         self.subscribed: list[str] | None = None
         self.assigned: list[TopicPartition] = []
         self.paused: list[TopicPartition] = []
+        self.seeks: list[tuple[str, int, int]] = []
         self.committed_offsets: dict[tuple[str, int], int] = {}
         self.committed_errors: dict[tuple[str, int], str] = {}
         self.committed = CommitLog(self.committed_offsets, self.committed_errors)
         self.commit_error = None
+        self.commit_raises: Exception | None = None
+        self.seek_raises: Exception | None = None
         self.closed = False
         self.time_offsets: dict[tuple[str, int, int], int] = {}
         self.time_errors: dict[tuple[str, int], str] = {}
         self.lookup_timeouts: list[float | None] = []
         self.watermarks: dict[tuple[str, int], tuple[int, int]] = {}
         self.partition_counts: dict[str, int] = {}
+        self.positions: dict[tuple[str, int], int] = {}
         self._queue: list[FakeMessage] = []
         self._on_assign = None
 
@@ -138,6 +142,8 @@ class FakeConsumer:
                 for p in partitions]
 
     def commit(self, offsets=None, asynchronous=True):
+        if self.commit_raises is not None:
+            raise self.commit_raises
         results = []
         for tp in offsets or []:
             results.append(_tp(tp.topic, tp.partition, tp.offset, self.commit_error))
@@ -151,8 +157,17 @@ class FakeConsumer:
     def resume(self, partitions):
         self.paused = []
 
+    def seek(self, partition):
+        if self.seek_raises is not None:
+            raise self.seek_raises
+        self.seeks.append((partition.topic, partition.partition, partition.offset))
+
     def get_watermark_offsets(self, partition, timeout=None, cached=False):
         return self.watermarks.get((partition.topic, partition.partition), (0, 0))
+
+    def position(self, partitions):
+        return [_tp(p.topic, p.partition, self.positions.get((p.topic, p.partition), OFFSET_INVALID))
+                for p in partitions]
 
     def list_topics(self, topic=None, timeout=None):
         names = [topic] if topic else list(self.partition_counts)

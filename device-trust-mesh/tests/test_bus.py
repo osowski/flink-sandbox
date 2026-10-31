@@ -3,6 +3,7 @@ import json
 import unittest
 
 import confluent_kafka
+from confluent_kafka import KafkaError, KafkaException
 from prometheus_client import REGISTRY
 
 from dtm.common.a2a import (A2AValidationError, dumps, send_message_request, status_update)
@@ -368,6 +369,15 @@ class CommitTest(unittest.TestCase):
         with self.assertRaises(CommitFailed):
             b.commit(inbound(offset=3))
 
+    def test_commit_maps_a_consumer_exception_to_commit_failed(self):
+        for code in (KafkaError.REBALANCE_IN_PROGRESS, KafkaError.ILLEGAL_GENERATION, KafkaError.UNKNOWN_MEMBER_ID):
+            with self.subTest(code=code):
+                b = bus("risk")
+                b._consumer.commit_raises = KafkaException(KafkaError(code))
+                with self.assertRaises(CommitFailed):
+                    b.commit(inbound(offset=3))
+                self.assertEqual(b._consumer.committed, [])
+
     def test_commit_flushes_the_producer_first(self):
         b = bus("risk")
         b.commit(inbound(offset=1))
@@ -379,6 +389,57 @@ class CommitTest(unittest.TestCase):
         with self.assertRaises(DeliveryFailed):
             b.commit(inbound(offset=1))
         self.assertEqual(b._consumer.committed, [])
+
+
+class EnsureDeliveredTest(unittest.TestCase):
+    def test_flushes_and_returns_when_everything_was_delivered(self):
+        b = bus("risk")
+        b.tombstone_card("risk")
+        b.ensure_delivered(2.0)
+        self.assertEqual(b._producer.flushed, 1)
+
+    def test_raises_on_a_delivery_error_and_clears_it(self):
+        b = bus("risk")
+        b._producer.fail_next_delivery = True
+        b.tombstone_card("risk")
+        with self.assertRaises(DeliveryFailed):
+            b.ensure_delivered(2.0)
+        b.commit(inbound(offset=1))
+        self.assertEqual(b._consumer.committed[-1], ("agent.tasks.risk", 0, 2))
+
+    def test_raises_when_messages_remain_queued(self):
+        b = bus("risk")
+        b._producer.flush = lambda timeout=None: 1
+        with self.assertRaises(DeliveryFailed):
+            b.ensure_delivered(0.5)
+
+
+class ReconfigureTest(unittest.TestCase):
+    def test_applies_a_policy_commands_change_in_place(self):
+        b = bus("risk")
+        b.reconfigure(BusConfig(policy_commands="disabled"))
+        self.assertEqual(b.config.policy_commands, "disabled")
+        b.produce_avro("device.policy-commands", CMD, "dev-0001")
+        self.assertEqual(b._producer.records, [])
+
+    def test_refuses_any_other_change(self):
+        for name, changed in (("topicPrefix", BusConfig(topic_prefix="x.")),
+                              ("mode", BusConfig(mode="replay")),
+                              ("allowedConsume", BusConfig(allowed_consume=("agent.cards",))),
+                              ("startPosition", BusConfig(start_position="earliest", mode="replay",
+                                                          replay_run_id="r1")),
+                              ("replayRunId", BusConfig(replay_run_id="r1"))):
+            with self.subTest(name):
+                b = bus("risk")
+                with self.assertRaises(ValueError):
+                    b.reconfigure(changed)
+                self.assertEqual(b.config, BusConfig())
+
+    def test_refuses_a_combined_change_without_applying_either(self):
+        b = bus("risk")
+        with self.assertRaises(ValueError):
+            b.reconfigure(BusConfig(policy_commands="disabled", topic_prefix="x."))
+        self.assertEqual(b.config, BusConfig())
 
 
 class PollTest(unittest.TestCase):
@@ -489,6 +550,19 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(b._consumer.paused, [])
         b._consumer.trigger_assign([("agent.tasks.risk", 2)])
         self.assertEqual(b._consumer.paused, [])
+
+    def test_paused_property_follows_pause_and_resume(self):
+        b = bus("risk")
+        self.assertFalse(b.paused)
+        b.pause()
+        self.assertTrue(b.paused)
+        b.resume()
+        self.assertFalse(b.paused)
+
+    def test_rewind_seeks_to_the_inbound_offset(self):
+        b = bus("risk", BusConfig(topic_prefix="replay.r1."))
+        b.rewind(Inbound("replay.r1.agent.tasks.risk", 3, 42, "dev-0001", {}, None, 0))
+        self.assertEqual(b._consumer.seeks, [("replay.r1.agent.tasks.risk", 3, 42)])
 
     def test_close_flushes_and_closes(self):
         b = bus("risk")

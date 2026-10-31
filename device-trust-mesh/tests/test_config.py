@@ -1,0 +1,273 @@
+import copy
+import logging
+import os
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+import yaml
+
+from dtm.common.config import KNOWN_AGENTS, ConfigError, FileConfigSource
+
+FIXTURE = Path(__file__).parent / "fixtures" / "etc-dtm"
+ENDPOINT = "http://h:11434"
+
+
+class TempRoot(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.root = Path(self.tmp) / "etc-dtm"
+        shutil.copytree(FIXTURE, self.root)
+
+    def src(self, **env):
+        env = {"LLM_ENDPOINT": ENDPOINT, **env}
+        return FileConfigSource(str(self.root), {k: v for k, v in env.items() if v is not None})
+
+    def edit_agents(self, **edits):
+        doc = yaml.safe_load((FIXTURE / "agents.yaml").read_text())
+        agents = doc["agents"]
+        if "model" in edits:
+            doc["llm"]["model"] = edits["model"]
+        if "risk_llm" in edits:
+            agents["risk"]["llm"] = edits["risk_llm"]
+        if "risk_enabled" in edits:
+            agents["risk"]["enabled"] = edits["risk_enabled"]
+        if "risk_replicas" in edits:
+            agents["risk"]["replicas"] = edits["risk_replicas"]
+        if "bus" in edits:
+            doc["bus"].update(edits["bus"])
+        if "context" in edits:
+            doc["context"].update(edits["context"])
+        if "agents" in edits:
+            doc["agents"].update(edits["agents"])
+        (self.root / "agents.yaml").write_text(yaml.safe_dump(doc))
+
+    def load_with(self, risk_prompt=None, **edits):
+        self.edit_agents(**edits)
+        if risk_prompt is not None:
+            (self.root / "prompts" / "risk.v1").write_text(risk_prompt)
+        return self.src().load()
+
+
+class LoadTests(TempRoot):
+    def test_loads_gitops_agents_yaml(self):
+        c = self.src().load()
+        self.assertEqual(set(c.agents), set(KNOWN_AGENTS))
+        self.assertFalse(c.agents["revocation"].enabled)
+        self.assertEqual(c.llm["endpoint"], ENDPOINT)
+        self.assertEqual(c.llm["timeoutMs"], 30000)
+        self.assertEqual(c.bus.policy_commands, "enabled")
+        self.assertEqual(c.context["waitTimeoutMs"], 2000)
+        self.assertEqual(c.agents["risk"].prompt_text, (FIXTURE / "prompts/risk.v1").read_text())
+        self.assertEqual(c.agents["risk"].prompt_ref, "risk.v1")
+        self.assertIsNone(c.agents["step-up"].prompt_ref)
+        self.assertIsNone(c.agents["step-up"].prompt_text)
+        self.assertEqual(c.agents["step-up"].replicas, 1)
+
+    def test_missing_env_var_is_config_error(self):
+        with self.assertRaises(ConfigError):
+            self.src(LLM_ENDPOINT=None).load()
+
+    def test_interpolation_only_touches_string_values(self):
+        c = self.src().load()
+        self.assertIs(type(c.llm["timeoutMs"]), int)
+        self.assertEqual(c.llm["options"]["temperature"], 0)
+
+    def test_per_agent_llm_override_merges(self):
+        c = self.load_with(risk_llm={"model": "qwen3:8b"})
+        self.assertEqual(c.agents["risk"].llm["model"], "qwen3:8b")
+        self.assertEqual(c.agents["risk"].llm["options"]["seed"], 42)
+        self.assertEqual(c.agents["enrolment"].llm["model"], "qwen3:4b")
+        self.assertEqual(c.llm["model"], "qwen3:4b")
+
+    def test_per_agent_options_merge_key_by_key(self):
+        c = self.load_with(risk_llm={"options": {"seed": 7}})
+        self.assertEqual(c.agents["risk"].llm["options"], {"temperature": 0, "seed": 7, "think": False, "num_ctx": 4096})
+
+    def test_replicas_bounded_by_partitions(self):
+        with self.assertRaises(ConfigError):
+            self.load_with(risk_replicas=7)
+        with self.assertRaises(ConfigError):
+            self.load_with(risk_replicas=0)
+        self.assertEqual(self.load_with(risk_replicas=6).agents["risk"].replicas, 6)
+
+    def test_unknown_agent_name_is_config_error(self):
+        with self.assertRaises(ConfigError):
+            self.load_with(agents={"sentinel": {"enabled": True, "replicas": 1}})
+
+    def test_unknown_provider_is_config_error(self):
+        with self.assertRaises(ConfigError):
+            self.load_with(risk_llm={"provider": "carrier-pigeon"})
+
+    def test_missing_prompt_file_is_config_error(self):
+        (self.root / "prompts" / "risk.v1").unlink()
+        with self.assertRaises(ConfigError):
+            self.src().load()
+
+    def test_prompt_ref_cannot_leave_prompts_dir(self):
+        (self.root / "secret").write_text("x")
+        with self.assertRaises(ConfigError):
+            self.load_with(agents={"risk": {"enabled": True, "replicas": 1, "promptRef": "../secret"}})
+
+    def test_invalid_bus_block_is_config_error(self):
+        with self.assertRaises(ConfigError):
+            self.load_with(bus={"policyCommands": "redirect", "topicPrefix": ""})
+
+    def test_invalid_yaml_is_config_error(self):
+        (self.root / "agents.yaml").write_text("llm: [unclosed")
+        with self.assertRaises(ConfigError):
+            self.src().load()
+
+    def test_missing_agents_yaml_is_config_error(self):
+        (self.root / "agents.yaml").unlink()
+        with self.assertRaises(ConfigError):
+            self.src().load()
+
+
+class ConfigVersionTests(TempRoot):
+    def test_config_version_changes_with_model_prompt_and_enabled(self):
+        base = self.src().load().agents["risk"].config_version
+        self.assertEqual(len(base), 12)
+        int(base, 16)
+        self.assertNotEqual(self.load_with(model="qwen3:8b").agents["risk"].config_version, base)
+        self.assertNotEqual(self.load_with(risk_prompt="new text").agents["risk"].config_version, base)
+        self.assertNotEqual(self.load_with(risk_enabled=False).agents["risk"].config_version, base)
+
+    def test_agent_without_prompt_ignores_prompt_edits(self):
+        self.edit_agents()
+        before = self.src().load().agents["step-up"].config_version
+        after = self.load_with(risk_prompt="new text").agents["step-up"].config_version
+        self.assertEqual(after, before)
+
+    def test_bus_and_context_blocks_are_part_of_the_version(self):
+        base = self.src().load().agents["step-up"].config_version
+        self.assertNotEqual(self.load_with(bus={"policyCommands": "disabled"}).agents["step-up"].config_version, base)
+        self.assertNotEqual(self.load_with(context={"waitTimeoutMs": 500}).agents["step-up"].config_version, base)
+
+    def test_version_follows_the_interpolated_endpoint(self):
+        a = self.src().load().agents["step-up"].config_version
+        b = self.src(LLM_ENDPOINT="http://other:11434").load().agents["step-up"].config_version
+        self.assertNotEqual(a, b)
+
+    def test_version_is_stable_across_loads(self):
+        self.assertEqual(self.src().load().agents["risk"].config_version, self.src().load().agents["risk"].config_version)
+
+
+class RefreshTests(TempRoot):
+    def test_refresh_returns_none_when_unchanged_and_new_config_when_changed(self):
+        s = self.src()
+        first = s.load()
+        self.assertIsNone(s.refresh())
+        (self.root / "prompts" / "risk.v1").write_text("changed")
+        changed = s.refresh()
+        self.assertIsNotNone(changed)
+        self.assertEqual(changed.agents["risk"].prompt_text, "changed")
+        self.assertNotEqual(changed.digest, first.digest)
+        self.assertNotEqual(changed.agents["risk"].config_version, first.agents["risk"].config_version)
+        self.assertIsNone(s.refresh())
+
+    def test_refresh_picks_up_agents_yaml_change(self):
+        s = self.src()
+        s.load()
+        self.edit_agents(model="qwen3:8b")
+        self.assertEqual(s.refresh().llm["model"], "qwen3:8b")
+
+    def test_refresh_keeps_last_good_on_invalid_yaml(self):
+        s = self.src()
+        s.load()
+        (self.root / "agents.yaml").write_text("llm: [unclosed")
+        with self.assertLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
+
+    def test_refresh_keeps_last_good_on_config_error(self):
+        s = self.src()
+        s.load()
+        self.edit_agents(risk_replicas=99)
+        with self.assertLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
+
+    def test_refresh_keeps_last_good_when_a_prompt_file_is_missing(self):
+        s = self.src()
+        s.load()
+        (self.root / "prompts" / "risk.v1").unlink()
+        with self.assertLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
+
+    def test_bad_read_is_not_recorded_as_seen(self):
+        s = self.src()
+        s.load()
+        good_yaml = (self.root / "agents.yaml").read_text()
+        (self.root / "agents.yaml").write_text("llm: [unclosed")
+        with self.assertLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
+        with self.assertLogs("dtm.common.config", logging.ERROR):
+            self.assertIsNone(s.refresh())
+        (self.root / "agents.yaml").write_text(good_yaml + "# touched\n")
+        self.assertIsNotNone(s.refresh())
+
+    def test_refresh_without_prior_load_loads(self):
+        self.assertIsNotNone(self.src().refresh())
+
+    def test_a_good_config_after_a_bad_one_is_returned(self):
+        s = self.src()
+        s.load()
+        (self.root / "agents.yaml").write_text("llm: [unclosed")
+        with self.assertLogs("dtm.common.config", logging.ERROR):
+            s.refresh()
+        self.edit_agents(model="qwen3:8b")
+        self.assertEqual(s.refresh().llm["model"], "qwen3:8b")
+
+
+def write_volume(directory: Path, files: dict[str, str], generation: str) -> None:
+    """Lay out ``directory`` like a mounted ConfigMap: name -> ..data/name, ..data -> ..<generation>."""
+    directory.mkdir(parents=True, exist_ok=True)
+    gen = directory / f"..{generation}"
+    gen.mkdir()
+    for name, text in files.items():
+        (gen / name).write_text(text)
+        link = directory / name
+        if not link.is_symlink():
+            link.symlink_to(f"..data/{name}")
+    tmp = directory / "..data_tmp"
+    tmp.symlink_to(gen.name)
+    os.replace(tmp, directory / "..data")
+
+
+class SymlinkSwapTests(TempRoot):
+    def build(self, risk_prompt="v1"):
+        shutil.rmtree(self.root)
+        self.root.mkdir()
+        self.agents_text = (FIXTURE / "agents.yaml").read_text()
+        write_volume(self.root, {"agents.yaml": self.agents_text}, "2026_10_31_01_00_00.1")
+        write_volume(self.root / "prompts", {"risk.v1": risk_prompt, "enrolment.v1": "e", "revocation.v1": "r"},
+                     "2026_10_31_01_00_00.2")
+
+    def test_configmap_symlink_swap_is_read(self):
+        self.build()
+        s = self.src()
+        self.assertEqual(s.load().agents["risk"].prompt_text, "v1")
+        self.assertIsNone(s.refresh())
+        write_volume(self.root / "prompts", {"risk.v1": "v2", "enrolment.v1": "e", "revocation.v1": "r"},
+                     "2026_10_31_01_05_00.3")
+        c = s.refresh()
+        self.assertIsNotNone(c)
+        self.assertEqual(c.agents["risk"].prompt_text, "v2")
+
+    def test_agents_yaml_symlink_swap_is_read(self):
+        self.build()
+        s = self.src()
+        s.load()
+        write_volume(self.root, {"agents.yaml": self.agents_text.replace("qwen3:4b", "qwen3:8b")},
+                     "2026_10_31_01_05_00.4")
+        self.assertEqual(s.refresh().llm["model"], "qwen3:8b")
+
+    def test_hidden_generation_directories_are_not_prompts(self):
+        self.build()
+        c = self.src().load()
+        self.assertEqual(c.agents["enrolment"].prompt_text, "e")
+
+
+if __name__ == "__main__":
+    unittest.main()

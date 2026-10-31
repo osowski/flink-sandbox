@@ -22,6 +22,7 @@ class RevocationAgent:
     name = "revocation"
     topics = None
     request_topic = SELF_TASK_TOPIC
+    reads_context = False
 
     def __init__(self, bus: AgentBus, context: SyncContext, llm: AgentLlm | None = None,
                  clock: Callable[[], float] = time.time):

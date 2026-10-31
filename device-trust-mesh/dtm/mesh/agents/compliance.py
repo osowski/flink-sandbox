@@ -24,6 +24,7 @@ class ComplianceAgent:
     name = "compliance"
     topics = ["agent.task-events"]
     request_topic = None
+    reads_context = False
 
     def __init__(self, bus: AgentBus, context: SyncContext | None = None, llm: AgentLlm | None = None,
                  clock: Callable[[], float] = time.time, seen_limit: int = 10_000):

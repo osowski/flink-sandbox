@@ -1,8 +1,9 @@
 """Runs one agent: its poll loop on a daemon thread, and its Ray Serve deployment.
 
-``AgentHost`` wraps an ``AgentRuntime`` around an ``Agent``. ``agent_deployment`` builds the Serve
-deployment for an agent: the replica starts a host from the mounted configuration, reports unhealthy when
-the poll loop thread dies, and stops the host when it is torn down.
+``AgentHost`` wraps an ``AgentRuntime`` around an ``Agent``. An agent that reads context starts consuming
+only once context-mcp answers a probe, so no request is failed while context-mcp is still catching up.
+``agent_deployment`` builds the Serve deployment for an agent: the replica starts a host from the mounted
+configuration, reports unhealthy when the poll loop thread dies, and stops the host when it is torn down.
 """
 import logging
 import threading
@@ -22,17 +23,25 @@ from dtm.mesh.runtime import AgentRuntime
 
 log = logging.getLogger(__name__)
 
+# A probe that hangs holds the poll thread at most this long plus the context call grace, well within the
+# time ``stop`` waits for the thread.
+_PROBE_TIMEOUT_S = 2.0
+_PROBE_BACKOFF_S = 0.5
+_PROBE_BACKOFF_MAX_S = 15.0
+
 
 class Agent(Protocol):
     """What the host needs of an agent.
 
     ``topics`` are the logical topics it consumes (None for its own task topic); ``request_topic`` is the
     topic its Agent Card advertises (``SELF_TASK_TOPIC`` for an agent that takes requests, None for an
-    observer of ``agent.task-events``).
+    observer of ``agent.task-events``). ``reads_context`` is optional and False when absent; an agent that
+    sets it True calls context-mcp from its handler, and its host waits for context-mcp before consuming.
     """
     name: str
     topics: list[str] | None
     request_topic: str | None
+    reads_context: bool
 
     def describe(self, settings: AgentSettings) -> tuple[str, list[dict]]: ...
 
@@ -40,11 +49,19 @@ class Agent(Protocol):
 
 
 class AgentHost:
-    """Owns the bus, and any ``closeables`` handed in, from ``start`` until ``stop``."""
+    """Owns the bus, and any ``closeables`` handed in, from ``start`` until ``stop``.
+
+    ``context`` is the context-mcp client the host probes before consuming, required for an agent that
+    reads context and unused otherwise.
+    """
 
     def __init__(self, agent: Agent, *, bus: AgentBus, config_source: FileConfigSource, bootstrap: str,
-                 closeables: Sequence = ()):
+                 context: SyncContext | None = None, closeables: Sequence = ()):
+        reads_context = getattr(agent, "reads_context", False)
+        if reads_context and context is None:
+            raise ValueError(f"agent {agent.name} reads context, so its host needs a context to probe")
         self._name = agent.name
+        self._context = context if reads_context else None
         self._bus = bus
         self._closeables = tuple(closeables)
         self._runtime = AgentRuntime(agent.name, bus, config_source, agent.describe, agent,
@@ -69,13 +86,35 @@ class AgentHost:
                 context.close()
             bus.close()
             raise
-        return cls(agent, bus=bus, config_source=source, bootstrap=bootstrap_servers(), closeables=(context,))
+        return cls(agent, bus=bus, config_source=source, bootstrap=bootstrap_servers(), context=context,
+                   closeables=(context,))
 
     def start(self) -> None:
         self._runtime.start()
-        self._thread = threading.Thread(target=self._runtime.run, args=(self._stop,),
-                                        name=f"dtm-agent-{self._name}", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=f"dtm-agent-{self._name}", daemon=True)
         self._thread.start()
+
+    def _run(self) -> None:
+        if self._context is not None and not self._await_context():
+            return
+        self._runtime.run(self._stop)
+
+    def _await_context(self) -> bool:
+        """Probe context-mcp with capped backoff until it answers; return False when the host stops first."""
+        delay = _PROBE_BACKOFF_S
+        while not self._stop.is_set():
+            try:
+                self._context.probe(_PROBE_TIMEOUT_S)
+            except Exception as e:
+                log.warning("%s: waiting for context-mcp before consuming, retrying in %gs: %r",
+                            self._name, delay, e)
+                if self._stop.wait(delay):
+                    return False
+                delay = min(delay * 2, _PROBE_BACKOFF_MAX_S)
+            else:
+                log.info("%s: context-mcp answered, consuming", self._name)
+                return True
+        return False
 
     def stop(self, timeout_s: float = 10.0) -> None:
         """Stop the poll loop, join its thread, then close the bus and the owned resources; safe to call again."""

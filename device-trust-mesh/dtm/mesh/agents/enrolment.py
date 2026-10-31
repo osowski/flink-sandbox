@@ -57,6 +57,7 @@ class EnrolmentAgent:
     name = "enrolment"
     topics = None
     request_topic = SELF_TASK_TOPIC
+    reads_context = True
 
     def __init__(self, bus: AgentBus, context: SyncContext, llm: AgentLlm,
                  clock: Callable[[], float] = time.time):

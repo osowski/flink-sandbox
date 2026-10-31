@@ -3,11 +3,13 @@
 One asyncio loop runs on a daemon thread and holds one ``ContextClient`` session open. The MCP client
 keeps its transport in task groups that must be entered and exited from one task, so a dedicated task owns
 the session from open to close; each call runs as its own task on the loop and uses that session. A call
-that raises, including one that times out, closes the session, and the next call opens a fresh one.
+that raises, including one that times out, closes the session, and the next call opens a fresh one. A call
+that fails on a session kept from an earlier call, which context-mcp may have dropped by restarting, is
+retried once on a fresh session.
 
-Every wait is bounded: a call raises ``TimeoutError`` within ``timeout_s`` of getting the session, within a
-grace of that however long it queued behind another call or its session took to close, and a call made
-once ``close`` has begun raises ``RuntimeError``.
+Every wait is bounded: a call, with its retry, raises ``TimeoutError`` within ``timeout_s`` of getting the
+session lock, within a grace of that however long it queued behind another call or its session took to
+close, and a call made once ``close`` has begun raises ``RuntimeError``.
 """
 import asyncio
 import logging
@@ -55,6 +57,10 @@ class SyncContext:
     def list_risk_signals(self, device_id: str, limit: int = 10) -> list[dict]:
         return self._call(lambda client: client.list_risk_signals(device_id, limit))
 
+    def probe(self, timeout_s: float) -> None:
+        """Return once context-mcp answers a trivial tool call within ``timeout_s``; raise otherwise."""
+        self._call(lambda client: client.list_risk_signals("", 0), timeout_s)
+
     def close(self) -> None:
         """Close the session on its loop, stop the loop and join its thread; safe to call again."""
         with self._state_lock:
@@ -77,28 +83,38 @@ class SyncContext:
         finally:
             self._loop.close()
 
-    def _call(self, use: Callable[[ContextClient], Awaitable]):
+    def _call(self, use: Callable[[ContextClient], Awaitable], timeout_s: float | None = None):
+        timeout_s = self._timeout_s if timeout_s is None else timeout_s
         # Submitting under the lock that ``close`` takes to set ``_closed`` puts every accepted call on the
         # loop ahead of the shutdown, which then waits for it.
         with self._state_lock:
             if self._closed:
                 raise RuntimeError("SyncContext is closed")
-            future = asyncio.run_coroutine_threadsafe(self._with_session(use), self._loop)
+            future = asyncio.run_coroutine_threadsafe(self._with_session(use, timeout_s), self._loop)
         try:
-            return future.result(self._timeout_s + _CALL_GRACE_S)
+            return future.result(timeout_s + _CALL_GRACE_S)
         except TimeoutError:
             if future.done():
                 raise
             future.cancel()
-            raise TimeoutError(f"context call did not finish within {self._timeout_s + _CALL_GRACE_S:g}s") from None
+            raise TimeoutError(f"context call did not finish within {timeout_s + _CALL_GRACE_S:g}s") from None
 
-    async def _with_session(self, use: Callable[[ContextClient], Awaitable]):
-        """Open the session if needed and run ``use`` on it within the timeout; any failure closes the session."""
+    async def _with_session(self, use: Callable[[ContextClient], Awaitable], timeout_s: float):
+        """Run ``use`` on the session within the timeout, opening one if needed; any failure closes the session.
+
+        A failure on a session kept from an earlier call is retried once on a fresh session.
+        """
         async with self._session_lock:
             try:
-                async with asyncio.timeout(self._timeout_s):
-                    session = self._session or await self._open()
-                    return await use(session.client)
+                async with asyncio.timeout(timeout_s):
+                    if self._session is None:
+                        return await use((await self._open()).client)
+                    try:
+                        return await use(self._session.client)
+                    except Exception as e:
+                        log.warning("context call failed on a reused session, retrying on a fresh one: %r", e)
+                        await self._drop()
+                        return await use((await self._open()).client)
             except BaseException:
                 await self._drop()
                 raise

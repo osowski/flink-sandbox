@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 from agent_fakes import make_bus, request_inbound
 from dtm.common.a2a import SELF_TASK_TOPIC, dumps
 from dtm.common.config import FileConfigSource
+from dtm.mesh.agents import host as host_module
 from dtm.mesh.agents.host import AgentHost, agent_deployment, build_agent_api
 from dtm.mesh.agents.reasoning import AgentLlm
 from fakes import msg
@@ -38,10 +40,36 @@ class RecordingAgent:
         self.handled.set()
 
 
+class ContextReadingAgent(RecordingAgent):
+    reads_context = True
+
+    def __init__(self, timeline=None):
+        super().__init__()
+        self.timeline = timeline if timeline is not None else []
+
+    def __call__(self, inbound, settings):
+        self.timeline.append("handled")
+        super().__call__(inbound, settings)
+
+
 class StubContext:
-    def __init__(self, target):
+    """A context whose probe fails ``down`` times (forever when None) before it answers."""
+
+    def __init__(self, target=None, *, down=0, timeline=None):
         self.target = target
         self.closed = 0
+        self.down = down
+        self.probes = 0
+        self.probed = threading.Event()
+        self.timeline = timeline if timeline is not None else []
+
+    def probe(self, timeout_s):
+        self.probes += 1
+        self.probed.set()
+        if self.down is None or self.probes <= self.down:
+            self.timeline.append("down")
+            raise ConnectionError("context-mcp not serving")
+        self.timeline.append("up")
 
     def close(self):
         self.closed += 1
@@ -99,6 +127,96 @@ class AgentHostTest(unittest.TestCase):
         host.stop()
         self.assertEqual(context.closed, 1)
         self.assertTrue(self.bus._consumer.closed)
+
+    def context_host(self, agent, context):
+        host = AgentHost(agent, bus=self.bus, config_source=FileConfigSource(str(self.root), ENV),
+                         bootstrap=BOOTSTRAP, context=context)
+        self.addCleanup(host.stop)
+        return host
+
+    def test_context_reader_consumes_only_once_context_mcp_answers(self):
+        timeline = []
+        agent = ContextReadingAgent(timeline)
+        context = StubContext(down=2, timeline=timeline)
+        host = self.context_host(agent, context)
+        self.queue_request()
+        with mock.patch.object(host_module, "_PROBE_BACKOFF_S", 0.01), \
+                self.assertLogs(host_module.log, "WARNING") as logs:
+            host.start()
+            self.assertTrue(agent.handled.wait(5))
+        self.assertEqual(timeline, ["down", "down", "up", "handled"])
+        self.assertEqual(len(logs.output), 2)
+        self.assertIn("waiting for context-mcp", logs.output[0])
+        host.check_alive()
+
+    def test_probe_backoff_doubles_up_to_its_cap(self):
+        delays = []
+        agent = ContextReadingAgent()
+        host = self.context_host(agent, StubContext(down=5))
+        host._stop.wait = lambda delay: delays.append(delay) or False
+        with mock.patch.object(host_module, "_PROBE_BACKOFF_S", 1.0), \
+                mock.patch.object(host_module, "_PROBE_BACKOFF_MAX_S", 4.0), \
+                self.assertLogs(host_module.log, "WARNING"):
+            self.assertTrue(host._await_context())
+        self.assertEqual(delays, [1.0, 2.0, 4.0, 4.0, 4.0])
+
+    def test_stop_interrupts_the_wait_for_context_mcp(self):
+        agent = ContextReadingAgent()
+        context = StubContext(down=None)
+        host = self.context_host(agent, context)
+        self.queue_request()
+        with mock.patch.object(host_module, "_PROBE_BACKOFF_S", 30.0), \
+                self.assertLogs(host_module.log, "WARNING"):
+            host.start()
+            self.assertTrue(context.probed.wait(5))
+            started = time.monotonic()
+            host.stop()
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertFalse(any(t.name == "dtm-agent-risk" for t in threading.enumerate()))
+        self.assertEqual(agent.calls, [])
+        self.assertTrue(self.bus._consumer.closed)
+
+    def test_agent_that_reads_no_context_is_not_gated(self):
+        context = StubContext(down=None)
+        host = self.context_host(self.agent, context)
+        self.queue_request()
+        host.start()
+        self.assertTrue(self.agent.handled.wait(5))
+        self.assertEqual(context.probes, 0)
+
+    def test_context_reader_needs_a_context_to_probe(self):
+        with self.assertRaisesRegex(ValueError, "risk"):
+            AgentHost(ContextReadingAgent(), bus=self.bus, config_source=FileConfigSource(str(self.root), ENV),
+                      bootstrap=BOOTSTRAP)
+
+    def test_only_the_agents_that_read_context_are_gated(self):
+        from dtm.mesh.agents.compliance import ComplianceAgent
+        from dtm.mesh.agents.enrolment import EnrolmentAgent
+        from dtm.mesh.agents.revocation import RevocationAgent
+        from dtm.mesh.agents.risk import RiskAgent
+        from dtm.mesh.agents.step_up import StepUpAgent
+        self.assertEqual({cls.name: cls.reads_context for cls in (RiskAgent, EnrolmentAgent, StepUpAgent,
+                                                                  ComplianceAgent, RevocationAgent)},
+                         {"risk": True, "enrolment": True, "step-up": True, "compliance": False,
+                          "revocation": False})
+
+    def test_from_environment_probes_the_agents_context(self):
+        agent = ContextReadingAgent()
+        made = {}
+
+        def context_factory(target):
+            made["context"] = StubContext(target)
+            return made["context"]
+
+        with mock.patch.dict(os.environ, ENV):
+            host = AgentHost.from_environment(lambda bus, ctx, llm: agent, "risk", config_root=str(self.root),
+                                              bus_factory=lambda name, config: self.bus,
+                                              context_factory=context_factory)
+            self.addCleanup(host.stop)
+            self.queue_request()
+            host.start()
+        self.assertTrue(agent.handled.wait(5))
+        self.assertEqual(made["context"].probes, 1)
 
     def test_from_environment_uses_mcp_url_and_bus_config(self):
         seen = {}

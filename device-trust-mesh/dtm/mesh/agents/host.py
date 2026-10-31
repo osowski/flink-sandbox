@@ -54,7 +54,7 @@ class AgentHost:
         self._stopped = False
 
     @classmethod
-    def from_environment(cls, make_agent: Callable[[SyncContext, AgentLlm], Agent], name: str, *,
+    def from_environment(cls, make_agent: Callable[[AgentBus, SyncContext, AgentLlm], Agent], name: str, *,
                          config_root: str = CONFIG_ROOT, bus_factory=AgentBus.connect,
                          context_factory=SyncContext) -> "AgentHost":
         source = FileConfigSource(config_root)
@@ -63,7 +63,7 @@ class AgentHost:
         context = None
         try:
             context = context_factory(config.context["mcpUrl"])
-            agent = make_agent(context, AgentLlm(name))
+            agent = make_agent(bus, context, AgentLlm(name))
         except BaseException:
             if context is not None:
                 context.close()
@@ -115,7 +115,7 @@ def build_agent_api(name: str) -> FastAPI:
 
 
 def agent_deployment(deployment_name: str, name: str, make_agent) -> serve.Deployment:
-    """Return the Serve deployment that runs the agent ``name``, built by ``make_agent(context, llm)``."""
+    """Return the Serve deployment that runs the agent ``name``, built by ``make_agent(bus, context, llm)``."""
 
     def builder() -> FastAPI:
         # Built inside the replica, like the context-mcp app.

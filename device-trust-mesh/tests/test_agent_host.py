@@ -113,8 +113,8 @@ class AgentHostTest(unittest.TestCase):
             context["stub"] = StubContext(target)
             return context["stub"]
 
-        def make_agent(ctx, llm):
-            seen["make"] = (ctx, llm)
+        def make_agent(agent_bus, ctx, llm):
+            seen["make"] = (agent_bus, ctx, llm)
             return self.agent
 
         with mock.patch.dict(os.environ, ENV):
@@ -125,8 +125,9 @@ class AgentHostTest(unittest.TestCase):
             host.start()
         self.assertEqual(seen["bus"], ("risk", expected.bus))
         self.assertEqual(context["stub"].target, expected.context["mcpUrl"])
-        self.assertIs(seen["make"][0], context["stub"])
-        self.assertIsInstance(seen["make"][1], AgentLlm)
+        self.assertIs(seen["make"][0], bus)
+        self.assertIs(seen["make"][1], context["stub"])
+        self.assertIsInstance(seen["make"][2], AgentLlm)
         card = [r for r in bus._producer.records if r.topic == "agent.cards"][-1]
         self.assertIn(f"kafka://{BOOTSTRAP}/", card.value.decode())
         host.stop()
@@ -136,7 +137,7 @@ class AgentHostTest(unittest.TestCase):
     def test_from_environment_releases_the_bus_when_construction_fails(self):
         bus = make_bus("risk")
 
-        def make_agent(ctx, llm):
+        def make_agent(agent_bus, ctx, llm):
             raise RuntimeError("no agent")
 
         with mock.patch.dict(os.environ, ENV), self.assertRaisesRegex(RuntimeError, "no agent"):
@@ -147,7 +148,7 @@ class AgentHostTest(unittest.TestCase):
 
 class AgentDeploymentTest(unittest.TestCase):
     def test_deployment_name(self):
-        self.assertEqual(agent_deployment("RiskAgent", "risk", lambda ctx, llm: RecordingAgent()).name,
+        self.assertEqual(agent_deployment("RiskAgent", "risk", lambda bus, ctx, llm: RecordingAgent()).name,
                          "RiskAgent")
 
     def test_api_serves_health_and_metrics(self):

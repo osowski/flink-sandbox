@@ -58,6 +58,10 @@ class TempRoot(unittest.TestCase):
         return self.src().load()
 
 
+def enrolment_with(guardrails) -> dict:
+    return {"enabled": True, "replicas": 1, "promptRef": "enrolment.v1", "guardrails": guardrails}
+
+
 MCP_URL = "http://device-trust-mesh-serve-svc.device-trust-mesh.svc.cluster.local:8000/context-mcp/mcp"
 UNVERSIONABLE = {
     "unquoted date": f"context:\n  mcpUrl: {MCP_URL}\n  since: 2026-10-31\n",
@@ -126,6 +130,30 @@ class LoadTests(TempRoot):
     def test_unknown_provider_is_config_error(self):
         with self.assertRaises(ConfigError):
             self.load_with(risk_llm={"provider": "carrier-pigeon"})
+
+    def test_guardrails_threshold_parsed(self):
+        c = self.load_with(agents={"enrolment": enrolment_with({"challengeAtRiskScore": 80})})
+        self.assertEqual(c.agents["enrolment"].guardrails, {"challengeAtRiskScore": 80})
+        self.assertEqual(self.src().load().agents["risk"].guardrails, {})
+        self.assertEqual(self.load_with(agents={"enrolment": enrolment_with({"challengeAtRiskScore": 0})})
+                         .agents["enrolment"].guardrails, {"challengeAtRiskScore": 0})
+
+    def test_guardrails_rejects_unknown_key_and_out_of_range(self):
+        bad = {"unknown key": {"threshold": 80}, "negative": {"challengeAtRiskScore": -1},
+               "above range": {"challengeAtRiskScore": 101}, "string": {"challengeAtRiskScore": "80"},
+               "boolean": {"challengeAtRiskScore": True}, "float": {"challengeAtRiskScore": 80.5}}
+        for what, guardrails in bad.items():
+            with self.subTest(what), self.assertRaisesRegex(ConfigError, "guardrails"):
+                self.load_with(agents={"enrolment": enrolment_with(guardrails)})
+        with self.assertRaisesRegex(ConfigError, "guardrails"):
+            self.load_with(agents={"enrolment": enrolment_with([80])})
+
+    def test_guardrails_change_changes_config_version(self):
+        low = self.load_with(agents={"enrolment": enrolment_with({"challengeAtRiskScore": 50})})
+        high = self.load_with(agents={"enrolment": enrolment_with({"challengeAtRiskScore": 80})})
+        self.assertNotEqual(low.agents["enrolment"].config_version, high.agents["enrolment"].config_version)
+        self.assertNotEqual(low.agents["enrolment"].config_version,
+                            self.src().load().agents["enrolment"].config_version)
 
     def test_unknown_prompt_ref_raises(self):
         with self.assertRaisesRegex(ConfigError, "nope.v1.*prompts/.*packaged"):

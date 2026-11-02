@@ -14,7 +14,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -28,7 +28,8 @@ KNOWN_AGENTS = ("risk", "enrolment", "step-up", "compliance", "revocation")
 
 _PROVIDERS = ("ollama", "openai-compatible", "recorded")
 _TOP_LEVEL_KEYS = ("llm", "agents", "bus", "context")
-_AGENT_KEYS = ("enabled", "replicas", "promptRef", "llm")
+_AGENT_KEYS = ("enabled", "replicas", "promptRef", "llm", "guardrails")
+_GUARDRAIL_KEYS = ("challengeAtRiskScore",)
 _MIN_REPLICAS = 1
 _MAX_REPLICAS = 6
 _VERSION_LENGTH = 12
@@ -49,6 +50,7 @@ class AgentSettings:
     llm: dict
     config_version: str
     context: dict
+    guardrails: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,15 @@ def _validate_context(context: dict) -> None:
         wait = context["waitTimeoutMs"]
         if not _is_int(wait) or wait <= 0:
             raise ConfigError(f"context.waitTimeoutMs must be a positive integer; got {wait!r}")
+
+
+def _validate_guardrails(guardrails: dict, what: str) -> None:
+    """``challengeAtRiskScore``, when present, is an integer from 0 to 100; no other key is known."""
+    _known_keys(guardrails, _GUARDRAIL_KEYS, what)
+    if "challengeAtRiskScore" in guardrails:
+        score = guardrails["challengeAtRiskScore"]
+        if not _is_int(score) or not 0 <= score <= 100:
+            raise ConfigError(f"{what}.challengeAtRiskScore must be an integer from 0 to 100; got {score!r}")
 
 
 def _packaged_prompt(ref: str) -> bytes | None:
@@ -242,6 +253,9 @@ class FileConfigSource:
         merged = _deep_merge(llm, _mapping(raw.get("llm", {}), f"agents.{name}.llm"))
         _validate_llm(merged, f"agents.{name}.llm")
 
+        guardrails = _mapping(raw.get("guardrails", {}), f"agents.{name}.guardrails")
+        _validate_guardrails(guardrails, f"agents.{name}.guardrails")
+
         prompt_ref = raw.get("promptRef")
         prompt_text = None
         if prompt_ref is not None:
@@ -258,4 +272,4 @@ class FileConfigSource:
 
         version = self.config_version(raw, merged, bus_block, context, prompt_text)
         return AgentSettings(name, enabled, replicas, prompt_ref, prompt_text, merged, version,
-                             copy.deepcopy(context))
+                             copy.deepcopy(context), copy.deepcopy(guardrails))

@@ -7,7 +7,7 @@ from dtm.common.bus import AgentBus, Inbound
 from dtm.common.config import AgentSettings
 from dtm.mesh.agents.context import SyncContext
 from dtm.mesh.agents.kit import COMPLETED, WORKING, Outputs, Request, parse_request, run_task
-from dtm.mesh.agents.reasoning import AgentLlm, system_and_user
+from dtm.mesh.agents.reasoning import AgentLlm, signal_facts, system_and_user
 from dtm.mesh.llm import OK
 
 RISK_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["score", "rationale"],
@@ -18,6 +18,12 @@ _DESCRIPTION = "Scores device enrolment risk from context-mcp and hands the deci
 _SKILLS = [{"id": "assess-enrolment", "name": "Assess enrolment risk",
             "description": "Scores the risk of enrolling a device from its context, its customer and its risk signals.",
             "tags": ["risk", "enrolment"]}]
+
+
+def risk_facts(fingerprint_summary: str, device: dict, customer: dict | None, signals: list[dict]) -> dict:
+    """Return the facts the risk model scores: the device, its customer and its raw risk signals."""
+    return {"fingerprintSummary": fingerprint_summary, "device": device, "customer": customer,
+            "signals": signal_facts(signals)}
 
 
 class RiskAgent:
@@ -55,10 +61,7 @@ class RiskAgent:
         customer = self._context.get_customer_context(customer_id)
         signals = self._context.list_risk_signals(device_id)
 
-        facts = {"fingerprintSummary": request.data["fingerprintSummary"], "device": device["device"],
-                 "customer": customer["customer"],
-                 "signals": [{"signalId": s["signal_id"], "signalType": s["signal_type"],
-                              "severity": s["severity"], "detail": s["detail"]} for s in signals]}
+        facts = risk_facts(request.data["fingerprintSummary"], device["device"], customer["customer"], signals)
         req, resp = self._llm.complete(settings, system_and_user(settings.prompt_text, facts), RISK_SCHEMA,
                                        request.message_id)
         interaction_id = outputs.llm_interaction(req, resp)

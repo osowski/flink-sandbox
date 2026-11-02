@@ -38,6 +38,12 @@ class AgentLlm:
         return self._cached[1]
 
 
+def signal_facts(signals: list[dict]) -> list[dict]:
+    """Return the risk signals as the models see them: id, type, severity and detail."""
+    return [{"signalId": s["signal_id"], "signalType": s["signal_type"], "severity": s["severity"],
+             "detail": s["detail"]} for s in signals]
+
+
 def system_and_user(prompt_text: str, facts: dict) -> list[dict]:
     """Return the chat messages for a prompt and its facts; the facts are compact JSON with sorted keys."""
     return [{"role": "system", "content": prompt_text},

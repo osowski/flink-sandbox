@@ -15,7 +15,7 @@ from dtm.common.config import AgentSettings
 from dtm.mesh.agents.context import SyncContext
 from dtm.mesh.agents.kit import (AUTH_REQUIRED, COMPLETED, REJECTED, WORKING, Outputs, Request, parse_request,
                                  run_task)
-from dtm.mesh.agents.reasoning import AgentLlm, system_and_user
+from dtm.mesh.agents.reasoning import AgentLlm, signal_facts, system_and_user
 from dtm.mesh.llm import OK, LLMResponse
 
 GRANT, DENY, CHALLENGE, GRANT_READ_ONLY = "GRANT", "DENY", "CHALLENGE", "GRANT_READ_ONLY"
@@ -43,6 +43,11 @@ _SKILLS = [
     {"id": "resolve-challenge", "name": "Resolve challenge",
      "description": "Completes a challenged enrolment with the step-up result.", "tags": ["enrolment", "step-up"]},
 ]
+
+
+def decision_facts(device: dict, risk: dict | None, signals: list[dict]) -> dict:
+    """Return the facts the enrolment model decides from; ``signals`` are already ``signal_facts``."""
+    return {"device": device, "riskAssessment": risk, "signals": signals}
 
 
 @dataclass(frozen=True)
@@ -100,8 +105,7 @@ class EnrolmentAgent:
         if context["status"] != "OK":
             raise RuntimeError(f"device context not materialized: {context['status']}")
         device = context["device"]
-        signals = [{"signalId": s["signal_id"], "signalType": s["signal_type"], "severity": s["severity"],
-                    "detail": s["detail"]} for s in self._context.list_risk_signals(device_id)]
+        signals = signal_facts(self._context.list_risk_signals(device_id))
         risk = request.data.get("riskAssessment")
         # An assessment without a score is treated as no assessment by the guardrails.
         score = (risk or {}).get("score")
@@ -140,7 +144,7 @@ class EnrolmentAgent:
 
     def _ask_model(self, outputs: Outputs, request: Request, settings: AgentSettings, device: dict,
                    risk: dict | None, score: int | None, signals: list[dict]) -> _Decision:
-        facts = {"device": device, "riskAssessment": risk, "signals": signals}
+        facts = decision_facts(device, risk, signals)
         req, resp = self._llm.complete(settings, system_and_user(settings.prompt_text, facts), DECISION_SCHEMA,
                                        request.message_id)
         threshold = settings.guardrails.get("challengeAtRiskScore", DEFAULT_CHALLENGE_AT_RISK_SCORE)

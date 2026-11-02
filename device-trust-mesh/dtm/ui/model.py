@@ -79,24 +79,25 @@ class Board:
         self._devices: dict[str, dict] = {}
         self._previous_status: dict[str, str | None] = {}
         self._decided_at: dict[str, int] = {}
-        self._pending_latency: OrderedDict[str, dict] = OrderedDict()
-        self._polled = False
+        self._latency: OrderedDict[str, dict] = OrderedDict()
         self._feed: deque[dict] = deque(maxlen=feed_limit)
         self._requesters: OrderedDict[str, str | None] = OrderedDict()
         self._pair_windows: dict[int, dict[tuple[str, str], int]] = {}
-        self._decision_window: deque[tuple[int, float]] = deque()
-        self._freshness_window: deque[tuple[int, float]] = deque()
+        self._decision_window: list[tuple[int, float]] = []
+        self._freshness_window: list[tuple[int, float]] = []
         self._context_lag: tuple[float | None, float | None] = (None, None)
         self._stale: dict[str, int | None] = dict.fromkeys(STALE_SOURCES)
 
     def apply_devices(self, rows: list[dict], polled_at_ms: int) -> list[Delta]:
-        """Fold in a ``/v1/devices`` poll; the first poll is a baseline and measures no freshness."""
+        """Fold in a ``/v1/devices`` poll.
+
+        Freshness is measured only when a device already on the board advances its context sequence, so
+        the first sighting of a device, including the whole first poll, measures none.
+        """
         with self._lock:
-            baseline = not self._polled
-            self._polled = True
             deltas: list[Delta] = []
             for row in rows:
-                changed = self._apply_device_row(row, polled_at_ms, baseline)
+                changed = self._apply_device_row(row, polled_at_ms)
                 if changed is not None:
                     deltas.append(("device", dict(changed)))
             deltas.append(("summary", self._summary()))
@@ -134,28 +135,29 @@ class Board:
     def apply_latency(self, value: dict, coord: Coord) -> list[Delta]:
         """Fold in an ``agent.decision_latency`` row; only enrolment decisions reach the board.
 
-        A row older than the device's latest decision is a replay and is ignored. A row for a device
-        the board has not listed yet waits and is applied when the device first appears.
+        A row older than the device's latest decision is a replay and is ignored; a re-delivered latest
+        row is applied again but observed once. The summary window is keyed on ``decision_time``. A row
+        for a device the board has not listed yet waits and is applied when the device first appears.
         """
         with self._lock:
             if value["artifact_name"] != ENROLMENT_DECISION:
                 return []
             device_id = value["device_id"]
             decided_at = to_epoch_ms(value["decision_time"])
-            if decided_at < self._decided_at.get(device_id, decided_at):
+            high_water = self._decided_at.get(device_id)
+            if high_water is not None and decided_at < high_water:
                 return []
             self._decided_at[device_id] = decided_at
-            applied = {"latency_ms": value["latency_ms"], "reason": _reason(value)}
-            if value["latency_ms"] is not None:
-                self._observe(self._decision_window, value["latency_ms"])
+            if value["latency_ms"] is not None and (high_water is None or decided_at > high_water):
+                self._observe(self._decision_window, decided_at, value["latency_ms"])
+            self._latency[device_id] = {"latency_ms": value["latency_ms"], "reason": _reason(value)}
+            self._latency.move_to_end(device_id)
+            while len(self._latency) > self._feed_limit:
+                self._latency.popitem(last=False)
             row = self._devices.get(device_id)
             if row is None:
-                self._pending_latency[device_id] = applied
-                self._pending_latency.move_to_end(device_id)
-                while len(self._pending_latency) > self._feed_limit:
-                    self._pending_latency.popitem(last=False)
                 return [("summary", self._summary())]
-            row.update(applied)
+            row.update(self._latency_fields(row))
             return [("device", dict(row)), ("summary", self._summary())]
 
     def apply_context_lag(self, p50_ms: float | None, p95_ms: float | None) -> list[Delta]:
@@ -190,31 +192,36 @@ class Board:
                     "feed": [dict(m) for m in reversed(self._feed)],
                     "pairs": self._pairs(), "summary": self._summary(), "stale": dict(self._stale)}
 
-    def _apply_device_row(self, row: dict, polled_at_ms: int, baseline: bool) -> dict | None:
+    def _apply_device_row(self, row: dict, polled_at_ms: int) -> dict | None:
         device_id = row["device_id"]
         seq = row["context_seq"]
         known = self._devices.get(device_id)
         core = {"customer_id": row["customer_id"], "trust_status": row["trust_status"],
-                "context_seq": seq, "last_event_time_ms": to_epoch_ms(row["last_event_time"])}
+                "context_seq": seq, "last_event_time_ms": to_epoch_ms(row["last_event_time"]),
+                "last_event_type": row["last_event_type"]}
         if known is not None and all(known[k] == v for k, v in core.items()):
             return None
         status_changed = known is None or known["trust_status"] != core["trust_status"]
         if known is not None and status_changed:
             self._previous_status[device_id] = known["trust_status"]
-        advanced = (known is None or known["context_seq"] is None
-                    or (seq is not None and seq > known["context_seq"]))
         freshness = known["freshness_ms"] if known is not None else None
-        if advanced and not baseline and core["last_event_time_ms"] is not None:
+        advanced = (known is not None and seq is not None
+                    and (known["context_seq"] is None or seq > known["context_seq"]))
+        if advanced and core["last_event_time_ms"] is not None:
             freshness = max(0, polled_at_ms - core["last_event_time_ms"])
-            self._observe(self._freshness_window, freshness)
+            self._observe(self._freshness_window, self._now_ms(), freshness)
         label, color = display_status(core["trust_status"], self._previous_status.get(device_id))
-        latency = known if known is not None else self._pending_latency.pop(device_id, {})
-        self._devices[device_id] = {
-            "device_id": device_id, **core, "label": label, "color": color,
-            "reason": latency.get("reason"), "latency_ms": latency.get("latency_ms"),
-            "freshness_ms": freshness,
-            "changed_at_ms": polled_at_ms if status_changed else known["changed_at_ms"]}
-        return self._devices[device_id]
+        new = {"device_id": device_id, **core, "label": label, "color": color, "reason": None,
+               "latency_ms": None, "freshness_ms": freshness,
+               "changed_at_ms": polled_at_ms if status_changed else known["changed_at_ms"]}
+        new.update(self._latency_fields(new))
+        self._devices[device_id] = new
+        return new
+
+    def _latency_fields(self, row: dict) -> dict:
+        """Return ``latency_ms`` and ``reason`` for a device row: the latest decision's, else the last event type."""
+        latest = self._latency.get(row["device_id"], {})
+        return {"latency_ms": latest.get("latency_ms"), "reason": latest.get("reason") or row["last_event_type"]}
 
     def _apply_reply(self, kind: str, value: dict, coord: Coord) -> list[Delta]:
         with self._lock:
@@ -232,14 +239,13 @@ class Board:
         self._feed.append(message)
         return "message", dict(message)
 
-    def _observe(self, window: deque, value: float) -> None:
-        window.append((self._now_ms(), value))
+    def _observe(self, window: list, at_ms: int, value: float) -> None:
+        window.append((at_ms, value))
         self._prune(window)
 
-    def _prune(self, window: deque) -> None:
+    def _prune(self, window: list) -> None:
         cutoff = self._now_ms() - self._window_ms
-        while window and window[0][0] < cutoff:
-            window.popleft()
+        window[:] = [(at, v) for at, v in window if at >= cutoff]
 
     def _now_ms(self) -> int:
         return round(self._clock() * 1000)

@@ -40,9 +40,10 @@ def status(message_id="m-3", causation_id="m-1", agent="risk", device_id="dev-00
             "task_id": "t-1", "state": "TASK_STATE_COMPLETED", "status_time": None, "status_text": None}
 
 
-def device(device_id="dev-0001", status="TRUSTED", seq=1, last_event_time=T0, customer_id="cust-001"):
+def device(device_id="dev-0001", status="TRUSTED", seq=1, last_event_time=T0, customer_id="cust-001",
+           last_event_type="LOGIN"):
     return {"device_id": device_id, "customer_id": customer_id, "trust_status": status,
-            "context_seq": seq, "last_event_time": last_event_time}
+            "context_seq": seq, "last_event_time": last_event_time, "last_event_type": last_event_type}
 
 
 def pair_count(window_end, from_agent, to_agent, count):
@@ -134,12 +135,36 @@ class DevicesTest(unittest.TestCase):
         self.assertEqual(kinds(deltas), ["summary"])
         self.assertEqual(self.board.snapshot()["devices"][0]["freshness_ms"], 350)
 
+    def test_device_first_seen_on_a_later_poll_has_no_freshness_until_it_advances(self):
+        self.board.apply_devices([device("a", seq=1)], T0)
+        deltas = self.board.apply_devices([device("a", seq=1), device("b", seq=7, last_event_time=1000)], 5000)
+        self.assertIsNone(payload(deltas, "device")["freshness_ms"])
+        self.assertIsNone(self.board.snapshot()["summary"]["freshness_p50_ms"])
+        deltas = self.board.apply_devices([device("a", seq=1), device("b", seq=8, last_event_time=5200)], 5500)
+        self.assertEqual(payload(deltas, "device")["freshness_ms"], 300)
+
+    def test_reason_falls_back_to_last_event_type_until_a_latency_row_arrives(self):
+        self.board.apply_devices([device(last_event_type="LOGIN")], T0)
+        self.assertEqual(self.board.snapshot()["devices"][0]["reason"], "LOGIN")
+        deltas = self.board.apply_devices([device(seq=2, last_event_type="GEO_CHANGE")], T0 + 500)
+        self.assertEqual(payload(deltas, "device")["reason"], "GEO_CHANGE")
+        self.board.apply_latency(latency(), coord())
+        self.assertEqual(self.board.snapshot()["devices"][0]["reason"], "GRANTED · ALLOW — looks fine")
+        self.board.apply_devices([device(seq=3, last_event_type="LOGIN")], T0 + 1000)
+        self.assertEqual(self.board.snapshot()["devices"][0]["reason"], "GRANTED · ALLOW — looks fine")
+        self.assertEqual(self.board.snapshot()["devices"][0]["last_event_type"], "LOGIN")
+
+    def test_last_event_type_change_alone_emits_device_delta(self):
+        self.board.apply_devices([device(last_event_type="LOGIN")], T0)
+        deltas = self.board.apply_devices([device(last_event_type="GEO_CHANGE")], T0 + 500)
+        self.assertEqual(kinds(deltas), ["device", "summary"])
+
     def test_device_row_fields(self):
         self.board.apply_devices([device(seq=3, status="PENDING")], T0 + 5)
         self.assertEqual(self.board.snapshot()["devices"][0], {
             "device_id": "dev-0001", "customer_id": "cust-001", "trust_status": "PENDING",
-            "context_seq": 3, "last_event_time_ms": T0, "label": "PENDING", "color": "grey",
-            "reason": None, "latency_ms": None, "freshness_ms": None, "changed_at_ms": T0 + 5})
+            "context_seq": 3, "last_event_time_ms": T0, "last_event_type": "LOGIN",
+            "label": "PENDING", "color": "grey", "reason": "LOGIN", "latency_ms": None, "freshness_ms": None, "changed_at_ms": T0 + 5})
 
     def test_status_change_moves_row_to_top_and_emits_device_delta(self):
         self.board.apply_devices([device("a", "TRUSTED"), device("b", "TRUSTED")], 1000)
@@ -322,10 +347,26 @@ class LatencyTest(unittest.TestCase):
         row = next(d for d in self.board.snapshot()["devices"] if d["device_id"] == "dev-0002")
         self.assertEqual(row["latency_ms"], 300)
 
+    def test_redelivered_row_is_observed_once_in_the_summary(self):
+        self.board.apply_devices([device("dev-0002")], T0)
+        slow = latency(latency_ms=300, decision_time=T0 + 1000)
+        self.board.apply_latency(slow, coord())
+        self.board.apply_latency(latency(device_id="dev-0002", latency_ms=100, decision_time=T0 + 1000), coord())
+        self.board.apply_latency(slow, coord())
+        summary = self.board.snapshot()["summary"]
+        self.assertEqual((summary["decision_p50_ms"], summary["decision_p95_ms"]), (100, 300))
+
+    def test_summary_window_is_keyed_on_decision_time(self):
+        self.board.apply_latency(latency(latency_ms=900, decision_time=T0 - 400_000), coord())
+        self.assertIsNone(self.board.snapshot()["summary"]["decision_p50_ms"])
+        self.assertEqual(self.board.snapshot()["devices"][0]["latency_ms"], 900)
+        self.board.apply_latency(latency(latency_ms=50, decision_time=T0 - 1000), coord())
+        self.assertEqual(self.board.snapshot()["summary"]["decision_p50_ms"], 50)
+
     def test_summary_percentiles_window(self):
         self.board.apply_latency(latency(latency_ms=1000, decision_time=T0 + 1000), coord())
         self.clock.now_ms = T0 + 200_000
-        self.board.apply_latency(latency(latency_ms=100, decision_time=T0 + 2000), coord())
+        self.board.apply_latency(latency(latency_ms=100, decision_time=T0 + 200_000), coord())
         self.assertEqual(self.board.snapshot()["summary"]["decision_p95_ms"], 1000)
         self.clock.now_ms = T0 + 400_000
         summary = self.board.snapshot()["summary"]

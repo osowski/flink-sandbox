@@ -115,15 +115,20 @@ def parse_task_event(bus: AgentBus, inbound: Inbound) -> TaskEvent | None:
 
 
 class Outputs:
-    """Emits the records an agent produces for one inbound record, each with a derived envelope and id."""
+    """Emits the records an agent produces for one inbound record, each with a derived envelope and id.
+
+    Replies carry the inbound JSON-RPC id; with ``own_rpc_ids`` an agent that answers no request gives each
+    reply its own ``messageId`` as the id.
+    """
 
     def __init__(self, bus: AgentBus, agent: str, settings: AgentSettings, cause: Cause,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, own_rpc_ids: bool = False):
         self._bus = bus
         self._agent_id = f"agent:{agent}"
         self._settings = settings
         self._cause = cause
         self._clock = clock
+        self._own_rpc_ids = own_rpc_ids
         self._index = 0
         self._key = cause.envelope.device_id
 
@@ -143,19 +148,22 @@ class Outputs:
         self._index += 1
         return envelope
 
+    def _rpc_id(self, envelope: Envelope) -> str:
+        return envelope.message_id if self._own_rpc_ids else self._cause.rpc_id
+
     def submitted(self, task_id: str) -> None:
         envelope = self.next_envelope()
-        self._reply(task_event(self._cause.rpc_id, task_id, self._cause.context_id, SUBMITTED, envelope,
+        self._reply(task_event(self._rpc_id(envelope), task_id, self._cause.context_id, SUBMITTED, envelope,
                                now_iso(envelope.event_time)))
 
     def status(self, task_id: str, state: str, text: str | None = None) -> None:
         envelope = self.next_envelope()
-        self._reply(status_update(self._cause.rpc_id, task_id, self._cause.context_id, state, envelope,
+        self._reply(status_update(self._rpc_id(envelope), task_id, self._cause.context_id, state, envelope,
                                   now_iso(envelope.event_time), text))
 
     def artifact(self, task_id: str, name: str, data: dict, text: str) -> None:
         envelope = self.next_envelope()
-        self._reply(artifact_update(self._cause.rpc_id, task_id, self._cause.context_id, envelope.message_id,
+        self._reply(artifact_update(self._rpc_id(envelope), task_id, self._cause.context_id, envelope.message_id,
                                     name, data, text, envelope))
 
     def send(self, to_agent: str, data: dict, text: str, *, task_id: str | None = None,
@@ -174,9 +182,11 @@ class Outputs:
         self._bus.produce_avro(LLM_INTERACTIONS_TOPIC, record, self._key)
         return record["envelope"]["message_id"]
 
-    def avro(self, topic: str, fields: dict) -> Envelope:
+    def avro(self, topic: str, fields: dict | Callable[[Envelope], dict]) -> Envelope:
+        """Produce a record of ``fields``; a callable builds them from the record's own envelope."""
         envelope = self.next_envelope()
-        self._bus.produce_avro(topic, {"envelope": envelope.to_avro(), **fields}, self._key)
+        body = fields(envelope) if callable(fields) else fields
+        self._bus.produce_avro(topic, {"envelope": envelope.to_avro(), **body}, self._key)
         return envelope
 
     def _reply(self, record: dict) -> None:

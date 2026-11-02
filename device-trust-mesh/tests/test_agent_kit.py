@@ -107,6 +107,20 @@ class KitTest(unittest.TestCase):
         self.assertEqual(handoff["params"]["message"]["referenceTaskIds"], [task_id])
         self.assertEqual(handoff["id"], ids.message_id("agent:risk", request.message_id, "cfg-1", 3))
 
+    def test_own_rpc_ids_answer_each_output_with_its_own_message_id(self):
+        request = parse_request(self.bus, self.inbound())
+        outputs = Outputs(self.bus, "risk", self.settings, request, clock=CLOCK, own_rpc_ids=True)
+        task_id = outputs.new_task_id()
+        outputs.submitted(task_id)
+        outputs.status(task_id, WORKING)
+        outputs.artifact(task_id, "risk-assessment", ASSESSMENT, "Low risk")
+        events = [value for _, value in produced(self.bus, "agent.task-events")]
+        message_ids = [next(iter(e["result"].values()))["metadata"]["urn:device-trust-mesh:envelope:v1"]["messageId"]
+                       for e in events]
+        self.assertEqual([e["id"] for e in events], message_ids)
+        self.assertEqual(len(set(message_ids)), 3)
+        self.assertNotIn(request.rpc_id, message_ids)
+
     def test_policy_command_record_shape(self):
         _, outputs = self.outputs()
         outputs.policy_command("CHALLENGE", "x", challenge_method="OTP", enrolment_task_id="t")
@@ -123,6 +137,13 @@ class KitTest(unittest.TestCase):
         envelope = outputs.avro("agent.llm-interactions", {"status": "OK"})
         ((_, value),) = produced(self.bus, "agent.llm-interactions")
         self.assertEqual(value, {"envelope": envelope.to_avro(), "status": "OK"})
+
+    def test_avro_fields_can_be_built_from_the_envelope(self):
+        _, outputs = self.outputs()
+        envelope = outputs.avro("audit.log", lambda e: {"audit_id": e.message_id, "recorded_at": e.event_time})
+        ((_, value),) = produced(self.bus, "audit.log")
+        self.assertEqual((value["audit_id"], value["recorded_at"]), (envelope.message_id, 1793323940500))
+        self.assertEqual(value["envelope"]["message_id"], envelope.message_id)
 
     def test_llm_interaction_is_keyed_and_returns_its_message_id(self):
         _, outputs = self.outputs()

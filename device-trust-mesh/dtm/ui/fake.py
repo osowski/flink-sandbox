@@ -4,8 +4,9 @@ About every ``EVENT_INTERVAL_MS`` one device sends an enrolment event, the pace 
 ``RATE_PERIOD_MS`` cycle so the pair sparklines have a shape, and the conversation it starts plays out
 as the same records the real sources hand the board: ``/v1/devices`` rows every 500 ms, view records with
 an ``envelope`` for tasks, decisions and statuses, ``agent.decision_latency`` rows for enrolment decisions
-and an ``agent.pair_counts`` window every 5 s. The router sends to risk and enrolment, and enrolment sends
-to compliance and, for a challenge, to step-up. Nothing here touches Kafka or HTTP.
+and an ``agent.pair_counts`` window every 5 s. The first leg runs router → risk → enrolment, and enrolment
+sends to compliance and, for a challenge, to step-up; the router resumes a challenged enrolment by sending
+to enrolment once the device answers. Nothing here touches Kafka or HTTP.
 """
 import heapq
 import itertools
@@ -165,10 +166,10 @@ class FakeFeed:
         corr = str(uuid.uuid4())
         to_risk = self._task(t, device_id, seq, corr, ROUTER, "risk", "ASSESS_RISK")
         score = 85 if scenario in _BLOCKING else 55 if scenario == "OUTDATED_OS" else 12
-        self._reply(t + self._jitter(500), device_id, seq, corr, to_risk, "risk", "risk-assessment",
+        assessed_at = t + self._jitter(500)
+        self._reply(assessed_at, device_id, seq, corr, to_risk, "risk", "risk-assessment",
                     outcome=None, policy_action=None, risk_score=score, rationale=f"{scenario} signals")
-        to_enrolment = self._task(t + self._jitter(900), device_id, seq, corr, ROUTER, "enrolment",
-                                  "DECIDE_ENROLMENT")
+        to_enrolment = self._task(assessed_at + 100, device_id, seq, corr, "risk", "enrolment", "DECIDE_ENROLMENT")
         decide_at = t + self._jitter(1800)
         to_compliance = self._task(decide_at - 500, device_id, seq, corr, "enrolment", "compliance", "AUDIT")
         self._reply(decide_at - 200, device_id, seq, corr, to_compliance, "compliance", "audit-record",

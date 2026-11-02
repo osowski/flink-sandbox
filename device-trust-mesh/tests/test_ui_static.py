@@ -70,6 +70,9 @@ class StaticFilesTest(unittest.TestCase):
         self.assertIn('"snapshot"', app_js)
         self.assertIn('"batch"', app_js)
 
+    def test_summary_names_context_materialization(self):
+        self.assertIn('"context materialization p50 / p95"', _static_text("app.js"))
+
     def test_static_assets_served_with_types(self):
         client = TestClient(build_app(Hub(Board()), lambda: {}))
         for name, media in (("app.js", "javascript"), ("style.css", "text/css")):

@@ -52,12 +52,28 @@ class FakeFeedTest(unittest.TestCase):
     def test_tasks_travel_the_mesh_edges_and_replies_find_their_requester(self):
         messages = self.of("message")
         edges = {(m["source"], m["target"]) for m in messages if m["kind"] == "task"}
-        self.assertEqual(edges, {(ROUTER, "risk"), (ROUTER, "enrolment"),
+        self.assertEqual(edges, {(ROUTER, "risk"), ("risk", "enrolment"), (ROUTER, "enrolment"),
                                  ("enrolment", "step-up"), ("enrolment", "compliance")})
         self.assertEqual({m["kind"] for m in messages}, {"task", "decision", "status"})
         for m in messages:
             with self.subTest(message=m["message_id"]):
                 self.assertIsNotNone(m["target"])
+
+    def test_first_leg_runs_through_risk_and_the_router_only_resumes_challenges(self):
+        tasks = [m for m in self.of("message") if m["kind"] == "task"]
+        challenged = set()
+        for m in tasks:
+            if (m["source"], m["target"]) == ("enrolment", "step-up"):
+                challenged.add(m["device_id"])
+            if (m["source"], m["target"]) == (ROUTER, "enrolment"):
+                with self.subTest(device=m["device_id"]):
+                    self.assertIn(m["device_id"], challenged)
+        self.assertTrue(any((m["source"], m["target"]) == (ROUTER, "enrolment") for m in tasks))
+
+    def test_enrolment_decisions_answer_risk_on_the_first_leg_and_the_router_on_the_second(self):
+        targets = {m["target"] for m in self.of("message")
+                   if m["kind"] == "decision" and m["source"] == "enrolment"}
+        self.assertEqual(targets, {"risk", ROUTER})
 
     def test_record_positions_are_unique(self):
         positions = [(m["topic"], m["partition"], m["offset"]) for m in self.of("message")]

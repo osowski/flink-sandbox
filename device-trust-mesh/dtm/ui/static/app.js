@@ -3,7 +3,7 @@
 "use strict";
 
 (() => {
-  // Flink commits arrive in bursts, so each batch's dots are spread over this long to keep the graph moving.
+  // Flink commits arrive in bursts, so a batch's dots are spread over at most this long to keep the graph moving.
   const SPREAD_MS = 10000;
   const DOT_MS = 1400;
   const FEED_LIMIT = 500;
@@ -37,6 +37,7 @@
   const nodeEls = new Map();
   let schedule = [];
   let dots = [];
+  let lastMessagesAt = null;
 
   function freshState() {
     return {
@@ -134,7 +135,7 @@
     kpi(`${freshness(s.freshness_p50_ms)} / ${freshness(s.freshness_p95_ms)}`, "freshness p50 / p95", "",
         FRESHNESS_TIP);
     const lag = (ms) => (ms == null ? "—" : `${Math.round(ms)} ms`);
-    kpi(`${lag(s.context_lag_p50_ms)} / ${lag(s.context_lag_p95_ms)}`, "context-mcp lag p50 / p95");
+    kpi(`${lag(s.context_lag_p50_ms)} / ${lag(s.context_lag_p95_ms)}`, "context materialization p50 / p95");
   }
 
   // ---- feed ----
@@ -244,6 +245,7 @@
     nodeEls.clear();
     schedule = [];
     dots = [];
+    lastMessagesAt = null;
     for (const agent of SEED_LAYOUT.keys()) drawNode(agent);
   }
 
@@ -262,13 +264,20 @@
     emptyText.toggleAttribute("hidden", state.feed.length > 0);
   }
 
-  // Dots and pulses keep their true order but are drawn spread over SPREAD_MS.
+  // A batch's dots and pulses keep their true order and are spread evenly over the time since the previous
+  // batch of messages arrived, capped at SPREAD_MS; the first batch after a snapshot uses SPREAD_MS. One Flink
+  // commit every ~10 s gets the full spread, while small frequent batches stay close to their feed rows.
+  // Nothing is queued while the tab is hidden, so a returning tab never replays a backlog.
   function scheduleVisuals(messages) {
+    const now = performance.now();
+    const spread = lastMessagesAt === null ? SPREAD_MS : Math.min(SPREAD_MS, now - lastMessagesAt);
+    lastMessagesAt = now;
+    if (document.hidden) return;
     const visual = messages.filter((m) => m.kind === "task" || m.kind === "decision")
       .sort((a, b) => a.time_ms - b.time_ms);
     if (!visual.length) return;
-    const now = performance.now();
-    const gap = SPREAD_MS / visual.length;
+    schedule = schedule.filter((ev) => ev.at >= now - SPREAD_MS);
+    const gap = spread / visual.length;
     visual.forEach((m, i) => schedule.push({ at: now + i * gap, kind: m.kind, source: m.source, target: m.target }));
     schedule.sort((a, b) => a.at - b.at);
   }

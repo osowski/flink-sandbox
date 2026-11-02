@@ -19,7 +19,7 @@ def stems(kind: str, suffix: str) -> set[str]:
 class SchemasTest(unittest.TestCase):
     def test_all_subjects_vendored(self):
         subjects = stems("avro", ".avsc")
-        self.assertEqual(len(subjects), 15)
+        self.assertEqual(len(subjects), 17)
         self.assertIn("device.events-value", subjects)
         self.assertEqual(stems("a2a", ".json"),
             {"agent.cards", "agent.task-events", "agent.tasks.enrolment",

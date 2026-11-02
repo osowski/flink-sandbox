@@ -14,6 +14,7 @@ previous settings.
 """
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 from confluent_kafka import KafkaException
@@ -21,7 +22,7 @@ from confluent_kafka import KafkaException
 from dtm.common.a2a import SELF_TASK_TOPIC, agent_card, task_topic
 from dtm.common.bus import AgentBus, CommitFailed, DeliveryFailed, Inbound
 from dtm.common.config import AgentSettings, ConfigError, FileConfigSource
-from dtm.common.metrics import HANDLER_ERRORS, LOOP_ERRORS
+from dtm.common.metrics import HANDLER_ERRORS, LOOP_ERRORS, PROCESSING_LATENCY_MS
 
 log = logging.getLogger(__name__)
 
@@ -108,12 +109,15 @@ class AgentRuntime:
                 stop.wait(_LOOP_BACKOFF_S)
 
     def _handle(self, inbound: Inbound) -> None:
+        started = time.monotonic()
         try:
             self.handler(inbound, self._settings)
         except Exception:
             HANDLER_ERRORS.labels(self.name).inc()
             log.exception("%s: handler failed on %s[%s]@%s", self.name, inbound.topic, inbound.partition,
                           inbound.offset)
+        finally:
+            PROCESSING_LATENCY_MS.labels(self.name).observe((time.monotonic() - started) * 1000)
 
     def _rewind(self, unhandled: list[Inbound]) -> None:
         """Seek each partition back to its first unhandled record so the consumer delivers them again."""

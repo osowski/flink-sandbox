@@ -16,7 +16,7 @@ from typing import Callable
 
 import confluent_kafka
 import httpx
-from confluent_kafka import TopicPartition
+from confluent_kafka import KafkaError, TopicPartition
 from prometheus_client.parser import text_string_to_metric_families
 
 from dtm.common.kafka import bootstrap_servers, consumer_config, schema_registry_url
@@ -36,6 +36,8 @@ _BATCH = 500
 _METADATA_TIMEOUT_S = 10.0
 _RETRY_BACKOFF_S = 1.0
 _STOP_JOIN_S = 5.0
+_PROBE_INTERVAL_S = 5.0
+_PROBE_TIMEOUT_S = 2.0
 _LAG_BUCKET = "dtm_materialization_lag_ms_bucket"
 _DEFAULT_CONTEXT_URL = "http://device-trust-mesh-serve-svc.device-trust-mesh.svc.cluster.local:8000/context-mcp"
 _HTTP_TIMEOUT_S = 2.0
@@ -102,6 +104,8 @@ class TopicReader(_Worker):
         self._publish = publish
         self._clock = clock
         self._assigned = False
+        self._down = False
+        self._probe_at: float | None = None
 
     @classmethod
     def connect(cls, board: Board, publish: Publish) -> "TopicReader":
@@ -115,8 +119,25 @@ class TopicReader(_Worker):
         def deserialize(topic: str, raw: bytes | None) -> dict | None:
             return avro(raw, SerializationContext(topic, MessageField.VALUE))
 
-        consumer = Consumer(ui_consumer_config(bootstrap_servers()))
-        return cls(board, consumer, deserialize, publish)
+        reader: TopicReader
+
+        def error_cb(err) -> None:
+            reader.on_error(err)
+
+        consumer = Consumer({**ui_consumer_config(bootstrap_servers()), "error_cb": error_cb})
+        reader = cls(board, consumer, deserialize, publish)
+        return reader
+
+    def on_error(self, err) -> None:
+        """Handle a client-level error; only the loss of every broker marks Kafka down.
+
+        librdkafka delivers these through the error callback, from inside ``consume``, and never as a
+        message, so an unreachable broker otherwise looks like an idle topic. A single transport error
+        is routine and reconnects on its own, so it is ignored.
+        """
+        if err.code() == KafkaError._ALL_BROKERS_DOWN:
+            log.warning("kafka: %s", err)
+            self._down = True
 
     def start_positions(self) -> list[TopicPartition]:
         """Return where each partition starts: the warm-up window on ``WARM_TOPICS``, the end elsewhere.
@@ -147,6 +168,7 @@ class TopicReader(_Worker):
             batch = self._consumer.consume(num_messages=_BATCH, timeout=timeout)
         except Exception as e:
             log.warning("kafka read failed: %s", e)
+            self._mark_down()
             self._finish(self._board.mark_stale("kafka", self._now_ms()))
             return 0
         failed = False
@@ -160,11 +182,41 @@ class TopicReader(_Worker):
                 deltas.extend(applied_deltas)
                 applied += 1
         if failed:
-            deltas.extend(self._board.mark_stale("kafka", self._now_ms()))
-        else:
-            deltas.extend(self._board.mark_fresh("kafka"))
+            self._mark_down()
+        deltas.extend(self._kafka_health(received=bool(batch) and not failed))
         self._finish(deltas)
         return applied
+
+    def _mark_down(self) -> None:
+        self._down = True
+        self._probe_at = None
+
+    def _kafka_health(self, received: bool) -> list[Delta]:
+        """Return the stale or fresh deltas for this batch.
+
+        While Kafka is down it stays stale until there is positive proof it is back: a batch that
+        carried records, or a metadata request that succeeds. An empty batch proves nothing.
+        """
+        if not self._down:
+            return []
+        now = self._clock()
+        if self._probe_at is None:
+            self._probe_at = now + _PROBE_INTERVAL_S
+        if received or (now >= self._probe_at and self._probe()):
+            self._down = False
+            self._probe_at = None
+            return self._board.mark_fresh("kafka")
+        if now >= self._probe_at:
+            self._probe_at = now + _PROBE_INTERVAL_S
+        return self._board.mark_stale("kafka", self._now_ms())
+
+    def _probe(self) -> bool:
+        try:
+            self._consumer.list_topics(UI_TOPICS[0], timeout=_PROBE_TIMEOUT_S)
+            return True
+        except Exception as e:
+            log.warning("kafka metadata probe failed: %s", e)
+            return False
 
     def _step(self) -> None:
         self.run_once()
@@ -270,11 +322,14 @@ class ContextPoller(_Worker):
                 raise httpx.HTTPStatusError(f"status {response.status_code}", request=response.request,
                                             response=response)
             rows = response.json()
-        except (httpx.HTTPError, ValueError) as e:
+            if not isinstance(rows, list):
+                raise ValueError(f"expected a list of devices, got {type(rows).__name__}")
+            deltas = self._board.apply_devices(rows, now_ms)
+        except Exception as e:
             log.warning("context-mcp device poll failed: %s", e)
             self._publish(self._board.mark_stale("context", now_ms))
             return
-        deltas = self._board.mark_fresh("context") + self._board.apply_devices(rows, now_ms)
+        deltas = self._board.mark_fresh("context") + deltas
         self._polls += 1
         if self._polls % self._metrics_every == 0:
             deltas += self._scrape_lag()

@@ -5,6 +5,7 @@ import unittest.mock
 
 import confluent_kafka
 import httpx
+from confluent_kafka import KafkaError
 
 from dtm.ui.model import Board, Coord
 from dtm.ui.sources import (UI_TOPICS, WARM_TOPICS, ContextPoller, TopicReader, context_base_url,
@@ -155,16 +156,18 @@ class RunOnceTest(unittest.TestCase):
 
     def test_consume_error_marks_kafka_stale_then_fresh(self):
         board = Board(clock=lambda: NOW_S)
-        r, published = reader(board=board, deserialize=lambda topic, raw: None)
+        r, published = reader(board=board, deserialize=lambda topic, raw: {"v": raw})
         r._consumer.queue([msg("agent.pair_counts", None, error="broker transport failure")])
         with self.assertLogs("dtm.ui.sources", "WARNING"):
             self.assertEqual(r.run_once(), 0)
         self.assertEqual(published, [[("stale", {"source": "kafka", "since_ms": NOW_MS})]])
         self.assertEqual(board.snapshot()["stale"]["kafka"], NOW_MS)
-        r._consumer.queue([])
+        r.run_once()
+        self.assertEqual(board.snapshot()["stale"]["kafka"], NOW_MS)
+        r._consumer.queue([msg("agent.pair_counts", b"ok", offset=1)])
         r.run_once()
         self.assertIsNone(board.snapshot()["stale"]["kafka"])
-        self.assertEqual(published[-1], [("stale", {"source": "kafka", "since_ms": None})])
+        self.assertEqual(published[-1][-1], ("stale", {"source": "kafka", "since_ms": None}))
 
     def test_consume_exception_marks_stale_and_does_not_raise(self):
         r, published = reader()
@@ -187,6 +190,112 @@ class RunOnceTest(unittest.TestCase):
         r._consumer.list_topics = original
         r.run_once()
         self.assertEqual(len(r._consumer.assigned), len(UI_TOPICS))
+
+
+class BrokerLossTest(unittest.TestCase):
+    def setUp(self):
+        self.now = NOW_S
+        self.board = Board(clock=lambda: self.now)
+        row = {"window_end": NOW_MS, "from_agent": "a", "to_agent": "b", "message_count": 3}
+        self.reader, self.published = reader(board=self.board, deserialize=lambda topic, raw: row)
+        self.reader._clock = lambda: self.now
+        self.reader.run_once()
+
+    def stale(self):
+        return self.board.snapshot()["stale"]["kafka"]
+
+    def all_brokers_down(self):
+        self.reader.on_error(KafkaError(KafkaError._ALL_BROKERS_DOWN, "all brokers down"))
+
+    def test_all_brokers_down_marks_stale_on_next_run_once(self):
+        self.all_brokers_down()
+        self.reader.run_once()
+        self.assertEqual(self.stale(), NOW_MS)
+        self.assertEqual(self.published, [[("stale", {"source": "kafka", "since_ms": NOW_MS})]])
+
+    def test_callback_fires_inside_consume(self):
+        real = self.reader._consumer.consume
+
+        def consume(num_messages=1, timeout=-1):
+            self.all_brokers_down()
+            return real(num_messages, timeout)
+        self.reader._consumer.consume = consume
+        self.reader.run_once()
+        self.assertEqual(self.stale(), NOW_MS)
+
+    def test_empty_batches_while_down_stay_stale(self):
+        self.all_brokers_down()
+        self.reader._consumer.list_topics = unittest.mock.Mock(side_effect=RuntimeError("timed out"))
+        for _ in range(5):
+            self.reader.run_once()
+            self.now += 1
+        self.assertEqual(self.stale(), NOW_MS)
+        self.assertEqual(len(self.published), 1)
+
+    def test_batch_with_messages_clears_stale(self):
+        self.all_brokers_down()
+        self.reader.run_once()
+        self.reader._consumer.queue([msg("agent.pair_counts", b"x", offset=1)])
+        self.assertEqual(self.reader.run_once(), 1)
+        self.assertIsNone(self.stale())
+        self.assertIn(("stale", {"source": "kafka", "since_ms": None}), self.published[-1])
+
+    def test_successful_probe_clears_stale(self):
+        self.all_brokers_down()
+        self.reader.run_once()
+        self.now += 1
+        self.reader.run_once()
+        self.assertEqual(self.stale(), NOW_MS)
+        self.now += 10
+        self.reader.run_once()
+        self.assertIsNone(self.stale())
+
+    def test_failed_probe_keeps_stale_and_retries(self):
+        self.all_brokers_down()
+        self.reader.run_once()
+        original = self.reader._consumer.list_topics
+        self.reader._consumer.list_topics = unittest.mock.Mock(side_effect=RuntimeError("timed out"))
+        self.now += 10
+        self.reader.run_once()
+        self.assertEqual(self.stale(), NOW_MS)
+        self.reader._consumer.list_topics = original
+        self.now += 10
+        self.reader.run_once()
+        self.assertIsNone(self.stale())
+
+    def test_probe_is_not_attempted_on_every_batch(self):
+        self.all_brokers_down()
+        self.reader.run_once()
+        self.reader._consumer.list_topics = unittest.mock.Mock(side_effect=RuntimeError("timed out"))
+        for _ in range(20):
+            self.reader.run_once()
+        self.reader._consumer.list_topics.assert_not_called()
+
+    def test_lone_transport_error_does_not_mark_stale(self):
+        self.reader.on_error(KafkaError(KafkaError._TRANSPORT, "connection reset"))
+        self.reader.run_once()
+        self.assertIsNone(self.stale())
+        self.assertEqual(self.published, [])
+
+    def test_healthy_empty_batches_publish_nothing(self):
+        for _ in range(3):
+            self.reader.run_once()
+        self.assertEqual(self.published, [])
+
+    def test_connect_wires_the_error_callback(self):
+        captured = {}
+
+        class Capturing:
+            def __init__(self, config):
+                captured.update(config)
+
+        with unittest.mock.patch("confluent_kafka.Consumer", Capturing), \
+                unittest.mock.patch("confluent_kafka.schema_registry.SchemaRegistryClient"), \
+                unittest.mock.patch("confluent_kafka.schema_registry.avro.AvroDeserializer"):
+            connected = TopicReader.connect(RecordingBoard(), lambda deltas: None)
+        captured["error_cb"](KafkaError(KafkaError._ALL_BROKERS_DOWN, "down"))
+        self.assertTrue(connected._down)
+        self.assertEqual(captured["isolation.level"], "read_committed")
 
 
 class ReaderThreadTest(unittest.TestCase):
@@ -294,6 +403,32 @@ class PollerTest(unittest.TestCase):
         self.assertEqual([d["device_id"] for d in snapshot["devices"]], ["dev-0001"])
         self.assertEqual(len(published), 2)
         self.assertIn(("stale", {"source": "context", "since_ms": None}), published[1])
+
+    def test_non_list_body_marks_stale_and_publishes(self):
+        for body in ({"devices": []}, "text", None):
+            p, published = poller(lambda request, body=body: httpx.Response(200, json=body))
+            with self.assertLogs("dtm.ui.sources", "WARNING"):
+                p.poll_once()
+            self.assertEqual(p._board.marks, [("mark_stale", "context", NOW_MS)])
+            self.assertEqual(p._board.calls, [])
+            self.assertEqual(len(published), 1)
+
+    def test_apply_failure_marks_stale_publishes_and_does_not_mark_fresh(self):
+        board = Board(clock=lambda: NOW_S)
+        p, published = poller(lambda request: httpx.Response(200, json=[{"device_id": "d"}]), board=board)
+        board.mark_stale("context", 1)
+        with self.assertLogs("dtm.ui.sources", "WARNING"):
+            p.poll_once()
+        self.assertEqual(board.snapshot()["stale"]["context"], 1)
+        self.assertEqual(len(published), 1)
+
+    def test_fresh_is_marked_only_after_devices_apply(self):
+        board = Board(clock=lambda: NOW_S)
+        board.mark_stale("context", 1)
+        p, published = poller(lambda request: httpx.Response(200, json=[DEVICE]), board=board)
+        p.poll_once()
+        self.assertIsNone(board.snapshot()["stale"]["context"])
+        self.assertEqual(len(published), 1)
 
     def test_transport_error_and_bad_body_report_stale(self):
         def refuse(request):

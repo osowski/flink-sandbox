@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 
 import fastavro
 
@@ -7,11 +8,15 @@ from agent_fakes import RISK_REQUEST, make_bus, produced, request_inbound, setti
 from dtm.common import ids
 from dtm.common.a2a import agent_card, validate
 from dtm.common.bus import Inbound
+from dtm.common.config import FileConfigSource
 from dtm.mesh.agents.compliance import ComplianceAgent
 from dtm.mesh.agents.kit import COMPLETED, Outputs, parse_request
+from dtm.mesh.runtime import AgentRuntime
+from fakes import msg
 
 CLOCK = lambda: 1793323940.5  # noqa: E731
 AUDIT_SCHEMA = "dtm/schemas/avro/audit.log-value.avsc"
+FIXTURE = Path(__file__).parent / "fixtures" / "etc-dtm"
 ASSESSMENT = {"score": 70, "rationale": "Impossible travel", "signalIds": ["sig-1"],
               "asOf": {"contextSeq": 7, "materializedAt": 1, "sourceOffsets": []}}
 GRANT = {"outcome": "GRANTED", "policyAction": "ALLOW", "rationale": "Low risk", "guardrails": []}
@@ -136,17 +141,44 @@ class ComplianceAgentTest(unittest.TestCase):
         self.assertEqual(self.audits(other_bus), [])
         self.assertEqual(produced(other_bus, "agent.task-events"), [])
 
-    def test_dedupes_on_message_id(self):
+    def test_dedupes_a_message_id_seen_at_another_offset(self):
         event = self.artifact_event()
-        self.feed([event, event])
+        self.feed([event, inbound("agent.task-events", event.value, offset=1)])
         self.assertEqual(len(self.audits()), 1)
         self.assertEqual(len(self.events()), 2)
+
+    def test_redelivery_of_the_same_record_is_audited_again_with_the_same_ids(self):
+        event = self.artifact_event()
+        self.feed([event, event])
+        first, second = self.audits()
+        self.assertEqual(first, second)
+        events = self.events()
+        self.assertEqual(events[:2], events[2:])
 
     def test_dedupe_remembers_the_most_recent_seen_limit_ids(self):
         agent = ComplianceAgent(self.bus, clock=CLOCK, seen_limit=2)
         first, second, third = (self.artifact_event(offset=i) for i in range(3))
-        self.feed([first, second, third, second, first], agent=agent)
+        again = [inbound("agent.task-events", e.value, offset=10 + i) for i, e in enumerate((second, first))]
+        self.feed([first, second, third, *again], agent=agent)
         self.assertEqual(len(self.audits()), 4)
+
+    def test_audit_is_produced_and_committed_when_its_first_delivery_fails(self):
+        runtime = AgentRuntime("compliance", self.bus, FileConfigSource(str(FIXTURE), {"LLM_ENDPOINT": "http://h"}),
+                               self.agent.describe, self.agent, bootstrap="broker:9092", topics=self.agent.topics,
+                               request_topic=self.agent.request_topic)
+        runtime.start()
+        record = msg("agent.task-events", json.dumps(self.artifact_event().value).encode(), key="dev-0001", offset=4)
+        self.bus._producer.fail_next_delivery = True
+        self.bus._consumer.queue([record])
+        with self.assertLogs("dtm.mesh.runtime", "ERROR"):
+            self.assertEqual(runtime.step(), 0)
+        self.assertEqual(self.bus._consumer.committed, [])
+        self.bus._consumer.queue([record])
+        self.assertEqual(runtime.step(), 1)
+        self.assertEqual(self.bus._consumer.committed, [("agent.task-events", 0, 5)])
+        failed, delivered = self.audits()
+        self.assertEqual(failed, delivered)
+        self.assertEqual([kind for kind, _ in self.events()], ["artifactUpdate", "statusUpdate"] * 2)
 
     def test_redelivery_after_restart_reproduces_ids(self):
         event = self.artifact_event()

@@ -68,6 +68,62 @@ class SyncContextTest(unittest.TestCase):
             self.assertEqual(self.ctx.get_device_context("dev-0001")["status"], "OK")
         self.assertEqual(opened.call_count, 2)
 
+    def test_failure_on_a_reused_session_is_retried_once_on_a_fresh_session(self):
+        self.assertEqual(self.ctx.get_device_context("dev-0001")["status"], "OK")
+        original = Client.call_tool
+        failures = []
+
+        async def dead_once(client, *args, **kwargs):
+            if not failures:
+                failures.append(1)
+                raise RuntimeError("session gone")
+            return await original(client, *args, **kwargs)
+
+        with mock.patch("dtm.mesh.agents.context.ContextClient", wraps=ContextClient) as opened, \
+                mock.patch.object(Client, "call_tool", dead_once), \
+                self.assertLogs(context_module.log, "WARNING") as logs:
+            self.assertEqual(self.ctx.get_device_context("dev-0001")["status"], "OK")
+        self.assertEqual(opened.call_count, 1)
+        self.assertIn("session gone", logs.output[0])
+
+    def test_a_reused_session_is_retried_only_once(self):
+        self.ctx.get_device_context("dev-0001")
+        calls = []
+
+        async def failing(client, *args, **kwargs):
+            calls.append(1)
+            raise RuntimeError("context-mcp down")
+
+        with mock.patch.object(Client, "call_tool", failing), self.assertLogs(context_module.log, "WARNING"), \
+                self.assertRaisesRegex(RuntimeError, "context-mcp down"):
+            self.ctx.get_device_context("dev-0001")
+        self.assertEqual(len(calls), 2)
+
+    def test_failure_on_a_fresh_session_is_not_retried(self):
+        calls = []
+
+        async def failing(client, *args, **kwargs):
+            calls.append(1)
+            raise RuntimeError("context-mcp down")
+
+        with self.assertNoLogs(context_module.log), mock.patch.object(Client, "call_tool", failing), \
+                self.assertRaisesRegex(RuntimeError, "context-mcp down"):
+            self.ctx.get_device_context("dev-0001")
+        self.assertEqual(len(calls), 1)
+
+    def test_probe_answers_from_a_serving_context_mcp(self):
+        self.assertIsNone(self.ctx.probe(1.0))
+
+    def test_probe_is_bounded_by_its_own_timeout(self):
+        async def hung(client, *args, **kwargs):
+            await asyncio.sleep(30)
+
+        started = time.monotonic()
+        with mock.patch.object(context_module, "_CALL_GRACE_S", 0.2), mock.patch.object(Client, "call_tool", hung), \
+                self.assertRaises(TimeoutError):
+            self.ctx.probe(0.2)
+        self.assertLess(time.monotonic() - started, 2)
+
     def test_call_that_exceeds_the_timeout_raises_and_the_next_one_succeeds(self):
         gate = threading.Event()
         original = Client.call_tool

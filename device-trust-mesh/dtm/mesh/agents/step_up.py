@@ -36,6 +36,7 @@ class StepUpAgent:
     name = "step-up"
     topics = None
     request_topic = SELF_TASK_TOPIC
+    reads_context = True
 
     def __init__(self, bus: AgentBus, context: SyncContext, llm: AgentLlm | None = None,
                  clock: Callable[[], float] = time.time):

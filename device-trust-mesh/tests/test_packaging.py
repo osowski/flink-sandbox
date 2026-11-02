@@ -7,7 +7,7 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 PACKAGED = ("dtm/schemas/avro/device.events-value.avsc", "dtm/schemas/a2a/agent.tasks.risk.json",
-            "dtm/prompts/risk.v1", "dtm/prompts/enrolment.v1",
+            "dtm/prompts/risk.v1", "dtm/prompts/enrolment.v1", "dtm/prompts/revocation.v1",
             "dtm/schemas/SOURCE", "dtm/py.typed")
 
 

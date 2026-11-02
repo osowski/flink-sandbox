@@ -164,6 +164,34 @@ class EnrolmentAgentTest(unittest.TestCase):
                 self.assert_decision("CHALLENGED", "CHALLENGE", AUTH_REQUIRED, ["NO_RISK_ASSESSMENT"])
                 self.assertNotIn("riskScore", self.decision())
 
+    def test_score_less_assessment_counts_as_missing_for_a_grant(self):
+        for decision in ("GRANT", "GRANT_READ_ONLY"):
+            with self.subTest(decision):
+                self.bus = make_bus("enrolment")
+                self.run_request(self.agent(ScriptedProvider(decided(decision))),
+                                 decide_data({"rationale": "No score.", "signalIds": []}))
+                self.assert_decision("CHALLENGED", "CHALLENGE", AUTH_REQUIRED, ["NO_RISK_ASSESSMENT"])
+                self.assertNotIn("riskScore", self.decision())
+
+    def test_score_less_assessment_still_records_a_pre_llm_decision(self):
+        cases = {"ALREADY_TRUSTED": ([{"device_id": "dev-0001", "trust_status": "TRUSTED"}], (),
+                                     ("GRANTED", "ALLOW", COMPLETED)),
+                 "COMPROMISED_OS": (DEVICES, [{"device_id": "dev-0001", "signal_id": "sig-9",
+                                               "signal_type": "COMPROMISED_OS"}], ("DENIED", "BLOCK", REJECTED))}
+        for guardrail, (devices, signals, (outcome, action, final)) in cases.items():
+            with self.subTest(guardrail):
+                self.bus = make_bus("enrolment")
+                self.run_request(self.agent(ScriptedProvider(), devices=devices, signals=signals),
+                                 decide_data({"rationale": "No score."}))
+                self.assert_decision(outcome, action, final, [guardrail], command=(action, outcome))
+                self.assertNotIn("riskScore", self.decision())
+
+    def test_score_less_assessment_still_records_an_llm_deny(self):
+        self.run_request(self.agent(ScriptedProvider(decided("DENY"))),
+                         decide_data({"rationale": "No score.", "signalIds": ["sig-1"]}))
+        self.assert_decision("DENIED", "BLOCK", COMPLETED, [], command=("BLOCK", "DENIED"))
+        self.assertNotIn("riskScore", self.decision())
+
     def test_llm_invalid_output_challenges(self):
         provider = ScriptedProvider(LLMResponse(ERROR, None, None, 10, error="output is not JSON"))
         self.run_request(self.agent(provider), decide_data(assessment(10)))

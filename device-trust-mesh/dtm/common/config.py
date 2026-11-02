@@ -259,6 +259,8 @@ class FileConfigSource:
         prompt_ref = raw.get("promptRef")
         prompt_text = None
         if prompt_ref is not None:
+            if not isinstance(prompt_ref, str):
+                raise ConfigError(f"agents.{name}.promptRef must be a string; got {prompt_ref!r}")
             prompt_bytes = snapshot.prompts.get(prompt_ref)
             if prompt_bytes is None:
                 prompt_bytes = _packaged_prompt(prompt_ref)

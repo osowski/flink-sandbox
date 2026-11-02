@@ -57,6 +57,7 @@ class EnrolmentAgent:
     name = "enrolment"
     topics = None
     request_topic = SELF_TASK_TOPIC
+    reads_context = True
 
     def __init__(self, bus: AgentBus, context: SyncContext, llm: AgentLlm,
                  clock: Callable[[], float] = time.time):
@@ -102,20 +103,23 @@ class EnrolmentAgent:
         signals = [{"signalId": s["signal_id"], "signalType": s["signal_type"], "severity": s["severity"],
                     "detail": s["detail"]} for s in self._context.list_risk_signals(device_id)]
         risk = request.data.get("riskAssessment")
+        # An assessment without a score is treated as no assessment by the guardrails.
+        score = (risk or {}).get("score")
 
         decision = self._pre_llm(device, signals)
         if decision is None:
-            decision = self._ask_model(outputs, request, settings, device, risk, signals)
+            decision = self._ask_model(outputs, request, settings, device, risk, score, signals)
 
+        # The artifact is complete before the policy command goes out, so nothing can fail between the two.
         outcome, action = _OUTCOMES[decision.decision]
-        if decision.decision != CHALLENGE:
-            outputs.policy_command(action, outcome)
         artifact = {"outcome": outcome, "policyAction": action, "rationale": decision.rationale,
                     "guardrails": decision.guardrails}
-        if risk is not None:
-            artifact["riskScore"] = risk["score"]
+        if score is not None:
+            artifact["riskScore"] = score
         if all(key in as_of for key in ("contextSeq", "materializedAt", "sourceOffsets")):
             artifact["asOf"] = {key: as_of[key] for key in ("contextSeq", "materializedAt", "sourceOffsets")}
+        if decision.decision != CHALLENGE:
+            outputs.policy_command(action, outcome)
         outputs.artifact(task_id, "enrolment-decision", artifact, f"{outcome}: {decision.rationale}")
         if decision.decision == CHALLENGE:
             outputs.send("step-up",
@@ -135,26 +139,26 @@ class EnrolmentAgent:
         return None
 
     def _ask_model(self, outputs: Outputs, request: Request, settings: AgentSettings, device: dict,
-                   risk: dict | None, signals: list[dict]) -> _Decision:
+                   risk: dict | None, score: int | None, signals: list[dict]) -> _Decision:
         facts = {"device": device, "riskAssessment": risk, "signals": signals}
         req, resp = self._llm.complete(settings, system_and_user(settings.prompt_text, facts), DECISION_SCHEMA,
                                        request.message_id)
-        decision = self._bound(resp, risk, settings.guardrails.get("challengeAtRiskScore",
-                                                                   DEFAULT_CHALLENGE_AT_RISK_SCORE))
+        threshold = settings.guardrails.get("challengeAtRiskScore", DEFAULT_CHALLENGE_AT_RISK_SCORE)
+        decision = self._bound(resp, risk, score, threshold)
         outputs.llm_interaction(req, resp, ",".join(decision.guardrails) or "PASSED")
         return decision
 
     @staticmethod
-    def _bound(resp: LLMResponse, risk: dict | None, threshold: int) -> _Decision:
+    def _bound(resp: LLMResponse, risk: dict | None, score: int | None, threshold: int) -> _Decision:
         """Apply the post-model guardrails in order; the first that fires turns the decision into a challenge."""
         if resp.status != OK:
             return _Decision(CHALLENGE, f"Model output unusable ({resp.status}); step-up required.",
                              ["LLM_OUTPUT_INVALID"], AUTH_REQUIRED)
         decision, rationale = resp.content["decision"], resp.content["rationale"]
         fired = None
-        if decision in (GRANT, GRANT_READ_ONLY) and risk is None:
+        if decision in (GRANT, GRANT_READ_ONLY) and score is None:
             fired = "NO_RISK_ASSESSMENT"
-        elif decision == GRANT and risk["score"] >= threshold:
+        elif decision == GRANT and score >= threshold:
             fired = "RISK_THRESHOLD"
         elif decision == GRANT and risk.get("signalIds"):
             fired = "UNRESOLVED_SIGNALS"

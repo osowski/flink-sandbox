@@ -107,13 +107,27 @@ python -m dtm.simulator.ctl inject OUTDATED_OS --count 3
 
 ## Images
 
-`quay.io/osowski/device-trust-mesh-simulator` and `quay.io/osowski/device-trust-mesh-ray` are built by the `device-trust-mesh-build-images.yml` workflow ([#30](https://github.com/osowski/flink-sandbox/issues/30)).
+| Image | Dockerfile | Base | Runs |
+|---|---|---|---|
+| `quay.io/osowski/device-trust-mesh-simulator` | `Dockerfile.simulator` | `python:3.12.16-slim` | `python -m dtm.simulator` (non-root) |
+| `quay.io/osowski/device-trust-mesh-ray` | `Dockerfile.ray` | `rayproject/ray:2.59.0-py312-cpu` | The RayService head and workers; Serve imports `dtm.mesh.*:app` |
+
+The [`device-trust-mesh-build-images.yml`](../.github/workflows/device-trust-mesh-build-images.yml) workflow builds both for `linux/amd64` and `linux/arm64`. Pull requests build without pushing; pushes to `main`, `device-trust-mesh-v*` tags and manual runs push to Quay. Both images share one version: tags look like `v1.0.0-202611021200` (`<repo-version>-<UTC build timestamp>`), plus a floating `:latest`. `<repo-version>` comes from the most recent `device-trust-mesh-v*` tag (`v0.0.0` until one exists). Cut a release by pushing a tag, then take the exact `<version_tag>` from the run it triggered:
+
+```bash
+git tag device-trust-mesh-v1.0.0
+git push-external origin device-trust-mesh-v1.0.0
+```
+
+The dependency pins live in `pyproject.toml` and the base images in the two Dockerfiles. The simulator installs the package without the `serve` extra, so it carries no Ray. When the Ray base image changes, change the `ray[serve]` pin and the RayService `rayVersion` with it.
+
+`./build.sh [tag]` builds both images locally for the host platform (default tag `dev`).
 
 ## Development
 
 ```bash
 cd device-trust-mesh
-uv venv -p 3.12 .venv && uv pip install -p .venv -e .
+uv venv -p 3.12 .venv && uv pip install -p .venv -e '.[serve]'
 .venv/bin/python -m unittest discover -s tests
 ```
 

@@ -1,0 +1,9 @@
+# Ray image for the device-trust-mesh RayService: context-mcp and the agents.
+# Build context is device-trust-mesh/. The Ray version here must match
+# rayVersion in the RayService and the ray[serve] pin in pyproject.toml.
+FROM rayproject/ray:2.59.0-py312-cpu
+
+COPY --chown=ray:users pyproject.toml /tmp/dtm/
+COPY --chown=ray:users dtm /tmp/dtm/dtm
+RUN pip install --no-cache-dir '/tmp/dtm[serve]' \
+    && rm -rf /tmp/dtm

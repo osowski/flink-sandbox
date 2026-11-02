@@ -4,13 +4,18 @@ version = "0.0.0"
 description = "Agentic Device Trust Mesh: Kafka, Flink and A2A agents on KubeRay"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "ray[serve]==2.59.0",
     "confluent-kafka[avro,schemaregistry,json]==2.16.1",
     "mcp==2.3.0",
     "a2a-sdk==1.3.0",
     "httpx==0.28.1",
     "prometheus-client==0.26.0",
     "pyyaml==6.0.3",
+]
+
+[project.optional-dependencies]
+# The Ray Serve mesh (context-mcp and the agents); the simulator runs without it.
+serve = [
+    "ray[serve]==2.59.0",
 ]
 
 [tool.setuptools.packages.find]

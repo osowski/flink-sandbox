@@ -7,6 +7,7 @@ import httpx
 import uvicorn
 
 from dtm.ui.app import build_app
+from dtm.ui.fake import FakeFeed
 from dtm.ui.hub import Hub
 from dtm.ui.model import Board
 from dtm.ui.sources import ContextPoller, TopicReader, context_base_url
@@ -27,10 +28,6 @@ def main(argv: list[str] | None = None) -> None:
     board = Board()
     hub = Hub(board)
     if args.fake:
-        try:
-            from dtm.ui.fake import FakeFeed
-        except ImportError:
-            parser.error("fake feed not available")
         workers = [FakeFeed(board, hub.publish_threadsafe)]
         http = None
     else:

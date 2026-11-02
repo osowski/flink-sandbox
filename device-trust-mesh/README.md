@@ -146,3 +146,12 @@ Refresh the vendored schemas in `dtm/schemas/` from a GitOps checkout, or verify
 python3 scripts/sync_schemas.py <gitops-checkout>
 python3 scripts/sync_schemas.py <gitops-checkout> --check
 ```
+
+## Model benchmark
+
+`scripts/benchmark_models.py` times the risk and enrolment prompts on native Ollama (spec §8.6). Each model answers the agents' packaged prompts, schemas and base options (`temperature 0`, `seed 42`, `think false`, `num_ctx 4096`), using the facts the agents build from `context-mcp`. There is one device per scenario: `CLEAN` plus the four injected risk scenarios. The enrolment model never sees `COMPROMISED_OS`, because a guardrail decides it first. The script prints nearest-rank p50/p95 latency, the schema-valid rate, and, per scenario, each model's risk scores and its enrolment decisions before the guardrails apply. The first call per model loads the model and isn't timed.
+
+```bash
+ollama pull qwen3:4b && ollama pull qwen3:8b
+.venv/bin/python scripts/benchmark_models.py --runs 10 --json bench.json   # --models, --endpoint
+```

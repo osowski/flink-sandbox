@@ -69,14 +69,18 @@ class AppTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    def test_fake_without_feed_exits_with_message(self):
-        with mock.patch.dict("sys.modules", {"dtm.ui.fake": None}), \
-                self.assertRaises(SystemExit) as raised, \
-                mock.patch("sys.stderr") as stderr:
+    def test_fake_runs_the_fake_feed_on_the_configured_port(self):
+        with mock.patch.object(ui_main, "FakeFeed") as fake_feed, \
+                mock.patch.object(ui_main.uvicorn, "run") as run, \
+                mock.patch.object(ui_main.logging, "basicConfig"), \
+                mock.patch.dict("os.environ", {"DTM_UI_PORT": "18099"}):
             ui_main.main(["--fake"])
-        self.assertNotEqual(raised.exception.code, 0)
-        written = "".join(c.args[0] for c in stderr.write.call_args_list)
-        self.assertIn("fake feed not available", written)
+        board, publish = fake_feed.call_args.args
+        self.assertIsInstance(board, Board)
+        self.assertEqual(publish.__name__, "publish_threadsafe")
+        fake_feed.return_value.start.assert_called_once()
+        fake_feed.return_value.stop.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["port"], 18099)
 
     def test_health_reports_board_stale_flags(self):
         board = Board()

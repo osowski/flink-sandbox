@@ -1,1 +1,75 @@
-<!doctype html><title>Device Trust Mesh</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device Trust Mesh</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Device Trust Mesh</h1>
+  <span id="conn" class="conn">connecting…</span>
+</header>
+<main class="dash">
+  <section id="pane-devices" class="pane">
+    <header class="pane-head">
+      <h2>Devices · live</h2>
+      <button type="button" class="maximize" aria-label="Maximize" title="Maximize (Esc restores)">⤢</button>
+    </header>
+    <div class="stale" hidden></div>
+    <div id="summary" class="kpis"></div>
+    <div class="scroll">
+      <table id="devices-table">
+        <thead><tr><th>Device</th><th>Customer</th><th>Status</th><th>Reason</th><th>Changed</th>
+          <th class="num">Event → decision</th><th class="num" title="measured at a 500 ms poll interval">Freshness</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+  <div class="side">
+    <section id="pane-traffic" class="pane">
+      <header class="pane-head">
+        <h2>Agent traffic</h2>
+        <span class="filter" hidden>filter: <b class="filter-pair"></b>
+          <button type="button" class="clear-filter" aria-label="Clear filter" title="Clear filter">✕</button></span>
+        <button type="button" class="maximize" aria-label="Maximize" title="Maximize (Esc restores)">⤢</button>
+      </header>
+      <div class="stale" hidden></div>
+      <div class="graph-wrap">
+        <svg id="traffic-graph" viewBox="0 0 640 250" preserveAspectRatio="xMidYMid meet" role="img"
+             aria-label="Agent traffic graph">
+          <g class="edges"></g>
+          <g class="dots"></g>
+          <g class="nodes"></g>
+          <text class="empty" x="320" y="242" text-anchor="middle" hidden></text>
+        </svg>
+      </div>
+      <div class="feed-wrap scroll">
+        <table id="feed">
+          <thead><tr><th>Time</th><th>Source → target</th><th>Kind</th><th>Device</th>
+            <th>Topic @ partition:offset</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <section id="pane-pairs" class="pane">
+      <header class="pane-head">
+        <h2>Busiest agent pairs</h2>
+        <span class="window"></span>
+        <button type="button" class="maximize" aria-label="Maximize" title="Maximize (Esc restores)">⤢</button>
+      </header>
+      <div class="stale" hidden></div>
+      <div class="scroll">
+        <table id="pairs-table">
+          <thead><tr><th>Source → target</th><th class="num">Msgs / 60 s</th><th class="bar-col"></th>
+            <th class="spark-col">Last windows</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

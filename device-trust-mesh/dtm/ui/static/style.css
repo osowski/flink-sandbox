@@ -45,6 +45,19 @@ body {
 .conn.live::before { color: var(--green); }
 .conn.down::before { color: var(--amber); }
 
+.explain-open {
+  margin-left: auto;
+  align-self: center;
+  background: var(--node);
+  color: var(--text);
+  border: 1px solid var(--node-line);
+  border-radius: 14px;
+  font-size: 13px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.explain-open:hover { border-color: var(--blue); }
+
 .dash {
   flex: 1;
   min-height: 0;
@@ -308,8 +321,8 @@ body.has-max .pane:not(.maximized) { visibility: hidden; }
 #pane-pairs.maximized table { font-size: 15px; }
 #pane-devices.maximized table { font-size: 15px; }
 
-/* Message viewer */
-#message-viewer {
+/* Message viewer and explainer */
+#message-viewer, #explainer {
   width: min(900px, 92vw);
   max-height: 90vh;
   padding: 0;
@@ -319,7 +332,7 @@ body.has-max .pane:not(.maximized) { visibility: hidden; }
   border-radius: 8px;
   overflow: hidden;
 }
-#message-viewer::backdrop { background: rgba(0, 0, 0, .6); }
+#message-viewer::backdrop, #explainer::backdrop { background: rgba(0, 0, 0, .6); }
 .viewer-inner { position: relative; padding: 18px 22px 20px; max-height: 90vh; overflow-y: auto; font-size: 14px; }
 .viewer-close {
   position: absolute;
@@ -362,3 +375,38 @@ body.has-max .pane:not(.maximized) { visibility: hidden; }
   font-size: 13px;
   line-height: 1.45;
 }
+
+/* Explainer */
+#explainer { width: min(1180px, 94vw); max-height: 94vh; }
+.explainer-inner { max-height: 94vh; padding: 20px 26px 24px; }
+.explainer-inner h2 { margin: 0 44px 8px 0; font-size: 21px; font-weight: 600; }
+.explainer-inner .summary { margin: 0 0 18px; font-size: 16px; line-height: 1.5; }
+.explainer-inner h3, .architecture summary { margin: 0 0 10px; font-size: 17px; font-weight: 600; }
+.architecture { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
+.architecture summary { cursor: pointer; }
+.architecture[open] summary { margin-bottom: 14px; }
+.diagram { display: block; width: 100%; height: auto; color: var(--text); }
+.diagram text { fill: currentColor; font-size: 15px; }
+.diagram .dg-name { font-size: 18px; font-weight: 600; }
+.diagram .dg-role { fill: #b4bdc8; font-size: 15px; font-weight: 400; }
+.diagram .dg-note { font-size: 15px; }
+.diagram .dg-note.muted { fill: var(--muted); font-style: italic; }
+.diagram .dg-topic { font-family: var(--mono); font-size: 14.5px; }
+.diagram .dg-topic.agent { fill: var(--blue); }
+.dg-node rect { fill: var(--node); stroke: var(--node-line); stroke-width: 1.5; }
+.dg-node.flink rect { fill: var(--flink); stroke: var(--flink-line); }
+.dg-node.idle rect { stroke-dasharray: 6 4; }
+.dg-node.idle text { fill: var(--muted); }
+.dg-arrow { fill: none; stroke: #8fa3ba; stroke-width: 2; }
+.dg-arrow.dashed { stroke-dasharray: 7 5; }
+.dg-head { fill: #8fa3ba; }
+.dg-group { fill: rgba(90, 176, 255, .04); stroke: var(--node-line); stroke-width: 1.5; stroke-dasharray: 2 4; }
+.diagram .dg-group-label { fill: var(--muted); font-size: 15px; font-weight: 600; }
+.dg-pill rect { stroke-width: 1.5; }
+.diagram .dg-pill text { font-family: var(--mono); font-size: 14.5px; }
+.dg-pill.data rect, .dg-swatch.data { fill: rgba(245, 165, 36, .14); stroke: var(--amber); }
+.dg-pill.agent rect, .dg-swatch.agent { fill: rgba(90, 176, 255, .14); stroke: var(--blue); }
+.dg-pill.other rect, .dg-swatch.other { fill: var(--panel); stroke: var(--grey); }
+.dg-swatch { stroke-width: 1.5; }
+.diagram .dg-legend text { font-size: 15px; }
+.diagram .dg-name-sm { font-weight: 600; }

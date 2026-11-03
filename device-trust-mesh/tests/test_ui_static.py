@@ -11,6 +11,11 @@ from dtm.ui.model import Board
 DOM_IDS = ("pane-devices", "pane-traffic", "pane-pairs", "summary", "devices-table", "traffic-graph",
            "feed", "pairs-table", "pane-activity", "activity-cards")
 STATIC = ("index.html", "app.js", "style.css")
+EXEC_SUMMARY = ("Every customer device that touches a financial account (a phone, a tablet or a browser) is either "
+                "trusted or a risk. This use case shows how a bank can manage that trust in real time with a mesh of "
+                "cooperating AI agents built on Kafka, Flink and KubeRay. Each agent has one narrow job: enrolment, "
+                "risk scoring, step-up checks, revocation or compliance. Together they replace rigid, batch-driven "
+                "device policy with continuous, explainable decisions.")
 
 
 class _Collector(HTMLParser):
@@ -20,17 +25,29 @@ class _Collector(HTMLParser):
         self.maximize_buttons = 0
         self.scripts: list[str] = []
         self.stylesheets: list[str] = []
+        self.details: list[dict] = []
+        self._details_stack: list[dict] = []
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        if tag == "details":
+            entry = {"open": "open" in attrs, "ids": []}
+            self.details.append(entry)
+            self._details_stack.append(entry)
         if "id" in attrs:
             self.ids.append(attrs["id"])
+            for entry in self._details_stack:
+                entry["ids"].append(attrs["id"])
         if tag == "button" and "maximize" in (attrs.get("class") or "").split():
             self.maximize_buttons += 1
         if tag == "script" and attrs.get("src"):
             self.scripts.append(attrs["src"])
         if tag == "link" and attrs.get("rel") == "stylesheet":
             self.stylesheets.append(attrs["href"])
+
+    def handle_endtag(self, tag):
+        if tag == "details" and self._details_stack:
+            self._details_stack.pop()
 
 
 def _static_text(name: str) -> str:
@@ -104,6 +121,32 @@ class StaticFilesTest(unittest.TestCase):
 
     def test_escape_leaves_maximized_pane_while_a_dialog_is_open(self):
         self.assertIn('document.querySelector("dialog[open]")', _static_text("app.js"))
+
+    def test_explainer_has_summary_and_both_diagrams(self):
+        html = _static_text("index.html")
+        self.assertIn("Agentic Device Trust Mesh: executive summary", html)
+        self.assertIn(EXEC_SUMMARY, " ".join(html.split()))
+        page = _Collector()
+        page.feed(html)
+        for dom_id in ("explain-open", "explainer", "diagram-agents", "diagram-architecture"):
+            with self.subTest(id=dom_id):
+                self.assertEqual(page.ids.count(dom_id), 1)
+        self.assertIn("The Complete Architecture", html)
+        for topic in ("agent.tasks.risk", "agent.tasks.enrolment", "agent.tasks.step-up", "agent.task-events"):
+            with self.subTest(topic=topic):
+                self.assertIn(topic, html)
+
+    def test_architecture_section_is_collapsed_by_default(self):
+        page = _Collector()
+        page.feed(_static_text("index.html"))
+        holders = [d for d in page.details if "diagram-architecture" in d["ids"]]
+        self.assertEqual(len(holders), 1)
+        self.assertFalse(holders[0]["open"])
+
+    def test_explainer_opens_only_from_its_button(self):
+        app_js = _static_text("app.js")
+        self.assertIn('$("#explain-open").addEventListener("click"', app_js)
+        self.assertNotIn("<dialog id=\"explainer\" open", _static_text("index.html"))
 
     def test_static_assets_served_with_types(self):
         client = TestClient(build_app(Hub(Board()), lambda: {}))

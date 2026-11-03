@@ -572,6 +572,12 @@
   $(".viewer-close", viewer).addEventListener("click", () => viewer.close());
   viewer.addEventListener("click", (e) => { if (e.target === viewer) viewer.close(); });
 
+  // ---- explainer ----
+  const explainer = $("#explainer");
+  $("#explain-open").addEventListener("click", () => explainer.showModal());
+  $(".viewer-close", explainer).addEventListener("click", () => explainer.close());
+  explainer.addEventListener("click", (e) => { if (e.target === explainer) explainer.close(); });
+
   // ---- stream ----
   function onSnapshot(snap) {
     const filter = state.filter;

@@ -10,6 +10,7 @@
 <header class="top">
   <h1>Device Trust Mesh</h1>
   <span id="conn" class="conn">connecting…</span>
+  <button type="button" id="explain-open" class="explain-open">What am I looking at?</button>
 </header>
 <main class="dash">
   <div class="col-left">
@@ -83,6 +84,192 @@
   <div class="viewer-inner">
     <button type="button" class="viewer-close" aria-label="Close" title="Close (Esc)">✕</button>
     <div class="viewer-body"></div>
+  </div>
+</dialog>
+<dialog id="explainer" aria-label="What am I looking at?">
+  <div class="viewer-inner explainer-inner">
+    <button type="button" class="viewer-close" aria-label="Close" title="Close (Esc)">✕</button>
+    <h2>Agentic Device Trust Mesh: executive summary</h2>
+    <p class="summary">Every customer device that touches a financial account (a phone, a tablet or a browser) is
+      either trusted or a risk. This use case shows how a bank can manage that trust in real time with a mesh of
+      cooperating AI agents built on Kafka, Flink and KubeRay. Each agent has one narrow job: enrolment, risk scoring,
+      step-up checks, revocation or compliance. Together they replace rigid, batch-driven device policy with
+      continuous, explainable decisions.</p>
+    <h3>The agents</h3>
+    <svg id="diagram-agents" class="diagram" viewBox="0 0 1120 545" role="img"
+         aria-label="The task router sends agent.tasks.risk to Risk, Risk hands off to Enrolment on agent.tasks.enrolment, Enrolment hands off to Step-up on agent.tasks.step-up only on CHALLENGE, and every agent reports to Compliance on agent.task-events. Revocation joins when enabled.">
+      <defs>
+        <marker id="ah-agents" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="13" markerHeight="13"
+                markerUnits="userSpaceOnUse" orient="auto"><path class="dg-head" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+      <g class="dg-node flink">
+        <rect x="22" y="16" width="240" height="70" rx="8"/>
+        <text class="dg-name" x="142" y="46" text-anchor="middle">A2A task router</text>
+        <text class="dg-role" x="142" y="70" text-anchor="middle">Flink SQL</text>
+      </g>
+      <path class="dg-arrow" d="M142,86 V190" marker-end="url(#ah-agents)"/>
+      <text class="dg-topic agent" x="160" y="132">agent.tasks.risk</text>
+      <text class="dg-note" x="160" y="156">a device asked to enrol</text>
+
+      <g class="dg-node">
+        <rect x="37" y="192" width="210" height="112" rx="8"/>
+        <text class="dg-name" x="142" y="222" text-anchor="middle">Risk</text>
+        <text class="dg-role" x="142" y="248" text-anchor="middle">scores the device 0–100</text>
+        <text class="dg-role" x="142" y="268" text-anchor="middle">with a rationale (LLM)</text>
+      </g>
+      <g class="dg-node">
+        <rect x="460" y="192" width="210" height="112" rx="8"/>
+        <text class="dg-name" x="565" y="222" text-anchor="middle">Enrolment</text>
+        <text class="dg-role" x="565" y="248" text-anchor="middle">grants, denies or</text>
+        <text class="dg-role" x="565" y="268" text-anchor="middle">challenges, within</text>
+        <text class="dg-role" x="565" y="288" text-anchor="middle">guardrails (LLM)</text>
+      </g>
+      <g class="dg-node">
+        <rect x="883" y="192" width="210" height="112" rx="8"/>
+        <text class="dg-name" x="988" y="222" text-anchor="middle">Step-up</text>
+        <text class="dg-role" x="988" y="248" text-anchor="middle">picks MFA push, OTP</text>
+        <text class="dg-role" x="988" y="268" text-anchor="middle">or biometric (no LLM)</text>
+      </g>
+
+      <path class="dg-arrow" d="M247,248 H458" marker-end="url(#ah-agents)"/>
+      <text class="dg-topic agent" x="352" y="238" text-anchor="middle">agent.tasks.enrolment</text>
+      <text class="dg-note" x="352" y="270" text-anchor="middle">score + rationale</text>
+      <path class="dg-arrow" d="M670,248 H881" marker-end="url(#ah-agents)"/>
+      <text class="dg-topic agent" x="776" y="238" text-anchor="middle">agent.tasks.step-up</text>
+      <text class="dg-note" x="776" y="270" text-anchor="middle">only on CHALLENGE</text>
+
+      <path class="dg-arrow" d="M142,304 V356 H526 V408" marker-end="url(#ah-agents)"/>
+      <path class="dg-arrow" d="M565,304 V408" marker-end="url(#ah-agents)"/>
+      <path class="dg-arrow" d="M988,304 V356 H604 V408" marker-end="url(#ah-agents)"/>
+      <text class="dg-topic agent" x="334" y="346" text-anchor="middle">agent.task-events</text>
+      <text class="dg-note" x="334" y="380" text-anchor="middle">audits each decision</text>
+      <text class="dg-topic agent" x="796" y="346" text-anchor="middle">agent.task-events</text>
+
+      <g class="dg-node">
+        <rect x="460" y="410" width="210" height="92" rx="8"/>
+        <text class="dg-name" x="565" y="440" text-anchor="middle">Compliance</text>
+        <text class="dg-role" x="565" y="466" text-anchor="middle">writes the audit trail</text>
+        <text class="dg-role" x="565" y="486" text-anchor="middle">(no LLM)</text>
+      </g>
+      <g class="dg-node idle">
+        <rect x="883" y="410" width="210" height="92" rx="8"/>
+        <text class="dg-name" x="988" y="440" text-anchor="middle">Revocation</text>
+        <text class="dg-role" x="988" y="466" text-anchor="middle">removes trust</text>
+      </g>
+      <text class="dg-note muted" x="988" y="530" text-anchor="middle">joins when enabled</text>
+      <path class="dg-arrow dashed" d="M883,456 H672" marker-end="url(#ah-agents)"/>
+      <text class="dg-topic agent" x="777" y="446" text-anchor="middle">agent.task-events</text>
+    </svg>
+    <details class="architecture">
+      <summary>The Complete Architecture</summary>
+      <svg id="diagram-architecture" class="diagram" viewBox="0 0 1120 776" role="img"
+           aria-label="Complete architecture: the device simulator produces device.events; Flink SQL builds the context tables, risk signals and human-readable views and routes tasks to the agents; the agents run on KubeRay and read context only through context-mcp; their policy commands go back to the simulator and into device.context; Compliance writes audit.log; this UI reads the human-readable topics and polls context-mcp.">
+        <defs>
+          <marker id="ah-arch" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="13" markerHeight="13"
+                  markerUnits="userSpaceOnUse" orient="auto"><path class="dg-head" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <g class="dg-node">
+          <rect x="36" y="24" width="200" height="60" rx="8"/>
+          <text class="dg-name" x="136" y="60" text-anchor="middle">Device simulator</text>
+        </g>
+        <path class="dg-arrow" d="M136,84 V122" marker-end="url(#ah-arch)"/>
+        <g class="dg-pill data">
+          <rect x="46" y="124" width="180" height="32" rx="16"/>
+          <text x="136" y="145" text-anchor="middle">device.events</text>
+        </g>
+        <path class="dg-arrow" d="M226,140 H288" marker-end="url(#ah-arch)"/>
+
+        <g class="dg-node flink">
+          <rect x="290" y="100" width="800" height="90" rx="8"/>
+          <text class="dg-name" x="314" y="134">Flink SQL <tspan class="dg-role">· CMF, shared compute pool</tspan></text>
+          <text class="dg-role" x="314" y="164">context tables · risk signals · A2A task router · human-readable views</text>
+        </g>
+
+        <path class="dg-arrow" d="M405,190 V238" marker-end="url(#ah-arch)"/>
+        <path class="dg-arrow" d="M578,190 V238" marker-end="url(#ah-arch)"/>
+        <path class="dg-arrow" d="M773,190 V238" marker-end="url(#ah-arch)"/>
+        <path class="dg-arrow" d="M1000,190 V238" marker-end="url(#ah-arch)"/>
+        <text class="dg-note" x="988" y="220" text-anchor="end">SendMessage</text>
+        <g class="dg-pill data">
+          <rect x="330" y="240" width="150" height="32" rx="16"/>
+          <text x="405" y="261" text-anchor="middle">device.context</text>
+        </g>
+        <g class="dg-pill data">
+          <rect x="494" y="240" width="168" height="32" rx="16"/>
+          <text x="578" y="261" text-anchor="middle">customer.context</text>
+        </g>
+        <text class="dg-note muted" x="492" y="292" text-anchor="middle">compacted</text>
+        <g class="dg-pill data">
+          <rect x="676" y="240" width="194" height="32" rx="16"/>
+          <text x="773" y="261" text-anchor="middle">device.risk-signals</text>
+        </g>
+        <g class="dg-pill agent">
+          <rect x="920" y="240" width="160" height="32" rx="16"/>
+          <text x="1000" y="261" text-anchor="middle">agent.tasks.risk</text>
+        </g>
+
+        <path class="dg-arrow" d="M310,190 V256 H228" marker-end="url(#ah-arch)"/>
+        <g class="dg-pill other">
+          <rect x="46" y="240" width="180" height="32" rx="16"/>
+          <text x="136" y="261" text-anchor="middle">*_human_readable</text>
+        </g>
+        <path class="dg-arrow" d="M136,272 V314" marker-end="url(#ah-arch)"/>
+        <g class="dg-node">
+          <rect x="36" y="316" width="200" height="60" rx="8"/>
+          <text class="dg-name" x="136" y="352" text-anchor="middle">This UI</text>
+        </g>
+        <path class="dg-arrow" d="M236,362 H262 V440 H318" marker-end="url(#ah-arch)"/>
+        <text class="dg-note" x="254" y="420" text-anchor="end">polls</text>
+
+        <rect class="dg-group" x="290" y="330" width="800" height="215" rx="10"/>
+        <text class="dg-group-label" x="310" y="530">KubeRay · RayService device-trust-mesh (Ray Serve)</text>
+        <path class="dg-arrow" d="M405,272 V388" marker-end="url(#ah-arch)"/>
+        <path class="dg-arrow" d="M578,272 V388" marker-end="url(#ah-arch)"/>
+        <path class="dg-arrow" d="M773,272 V318 H600 V388" marker-end="url(#ah-arch)"/>
+        <path class="dg-arrow" d="M1000,272 V388" marker-end="url(#ah-arch)"/>
+        <g class="dg-node">
+          <rect x="320" y="390" width="300" height="100" rx="8"/>
+          <text class="dg-name" x="470" y="432" text-anchor="middle">context-mcp</text>
+          <text class="dg-role" x="470" y="458" text-anchor="middle">materializer + MCP tools</text>
+        </g>
+        <path class="dg-arrow" d="M720,440 H622" marker-end="url(#ah-arch)"/>
+        <text class="dg-note" x="670" y="430" text-anchor="middle">MCP tools</text>
+        <text class="dg-note" x="670" y="462" text-anchor="middle">read context</text>
+        <g class="dg-node">
+          <rect x="720" y="390" width="350" height="132" rx="8"/>
+          <text class="dg-name" x="895" y="416" text-anchor="middle">Agents</text>
+          <text class="dg-role" x="895" y="440" text-anchor="middle">Risk · Enrolment · Step-up</text>
+          <text class="dg-role" x="895" y="460" text-anchor="middle">Compliance · Revocation</text>
+          <text class="dg-role" x="895" y="486" text-anchor="middle">talk A2A over Kafka on</text>
+          <text class="dg-topic agent" x="895" y="508" text-anchor="middle">agent.tasks.* · agent.task-events</text>
+        </g>
+
+        <path class="dg-arrow" d="M780,522 V593" marker-end="url(#ah-arch)"/>
+        <path class="dg-arrow" d="M990,522 V593" marker-end="url(#ah-arch)"/>
+        <text class="dg-note" x="980" y="572" text-anchor="end">Compliance</text>
+        <g class="dg-pill other">
+          <rect x="675" y="595" width="210" height="32" rx="16"/>
+          <text x="780" y="616" text-anchor="middle">device.policy-commands</text>
+        </g>
+        <g class="dg-pill other">
+          <rect x="930" y="595" width="120" height="32" rx="16"/>
+          <text x="990" y="616" text-anchor="middle">audit.log</text>
+        </g>
+        <path class="dg-arrow" d="M675,611 H16 V54 H34" marker-end="url(#ah-arch)"/>
+        <text class="dg-note" x="330" y="602" text-anchor="middle">applied on the device</text>
+        <path class="dg-arrow" d="M800,627 V648 H1106 V145 H1092" marker-end="url(#ah-arch)"/>
+        <text class="dg-note" x="953" y="670" text-anchor="middle">folded back into device.context</text>
+
+        <g class="dg-legend">
+          <rect class="dg-swatch agent" x="36" y="696" width="28" height="16" rx="8"/>
+          <text x="74" y="709"><tspan class="dg-name-sm">agent plane:</tspan> agent.tasks.*, agent.task-events, agent.cards, agent.llm-interactions</text>
+          <rect class="dg-swatch data" x="36" y="724" width="28" height="16" rx="8"/>
+          <text x="74" y="737"><tspan class="dg-name-sm">business-data plane:</tspan> device.events, device.context, customer.context, device.risk-signals</text>
+          <rect class="dg-swatch other" x="36" y="752" width="28" height="16" rx="8"/>
+          <text x="74" y="765"><tspan class="dg-name-sm">outputs:</tspan> device.policy-commands, audit.log, *_human_readable</text>
+        </g>
+      </svg>
+    </details>
   </div>
 </dialog>
 <script src="/static/app.js"></script>

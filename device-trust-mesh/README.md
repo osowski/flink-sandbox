@@ -108,11 +108,16 @@ python -m dtm.simulator.ctl inject OUTDATED_OS --count 3
 
 ## UI
 
-`python -m dtm.ui` serves a single live page on `DTM_UI_PORT`. It reads five topics (`agent.tasks_human_readable`, `agent.decisions_human_readable`, `agent.task-status_human_readable`, `agent.pair_counts`, `agent.decision_latency`) and polls `context-mcp` for the device table, keeps the result in memory, and pushes changes to the browser over Server-Sent Events (`/events`). The page has three panes, each of which can be maximized:
+`python -m dtm.ui` serves a single live page on `DTM_UI_PORT`. It reads five topics (`agent.tasks_human_readable`, `agent.decisions_human_readable`, `agent.task-status_human_readable`, `agent.pair_counts`, `agent.decision_latency`) and polls `context-mcp` for the device table, keeps the result in memory, and pushes changes to the browser over Server-Sent Events (`/events`). The page has four panes, each of which can be maximized (Esc restores): Devices · live above Busiest agent pairs on the left, Agent traffic above Agent activity on the right.
 
 - **Devices · live:** a summary row and a table of devices with customer, trust status, decision reason, time of the last change, event-to-decision latency and freshness (how long the context table took to reflect the change, measured at a 500 ms poll interval). The summary row also shows context materialization p50 / p95, an approximation interpolated from the `dtm_materialization_lag_ms` histogram's growth over the last 60 s (`> 60 s` when it exceeds the largest bucket); it keeps the last values while nothing new is materialized.
-- **Agent traffic:** a graph of the agents with a moving dot per message, and a feed of source, target, kind, device and `topic @ partition:offset`. Clicking an edge filters the feed to that pair.
 - **Busiest agent pairs:** the message rate for each source and target pair as messages per 60 s, normalised from each `agent.pair_counts` row's own window length (the page labels the averaging window, for example `avg over last 5 min`), with a bar and a sparkline of recent windows.
+- **Agent traffic:** a graph of the agents with a moving dot per message, and a feed of source, target, kind, device and `topic @ partition:offset`. Clicking an edge filters the feed to that pair; the feed shows while the pane is maximized.
+- **Agent activity:** one card per agent with a speech bubble for its latest message: who it went to, the customer, the device and the action, tinted by outcome. Each bubble stays up for at least 2 s before a newer one replaces it, and hovering a bubble highlights that device's row in the devices table.
+
+Clicking a bubble or a feed row opens the message viewer, which shows the message's human-readable row (the key fields, then the full JSON with a copy button). It reads `GET /messages/{message_id}`; the service holds the most recent 500 messages and answers 404 for anything older.
+
+The **What am I looking at?** button in the header opens an explainer for presenting the demo: the executive summary, a diagram of the agents and the topics they hand off on, and the complete architecture, collapsed by default.
 
 The service reads with `read_committed`, uses a unique `dtm.ui.<uuid>` group id per process, assigns partitions itself and never commits offsets, so a restart does not replay history except for a short warm-up on `agent.pair_counts` and `agent.decision_latency`. `/healthz` returns `kafka_stale_since_ms` and `context_stale_since_ms` (`null` while the source is fresh) and does not fail when an upstream is down.
 

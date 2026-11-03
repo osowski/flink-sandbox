@@ -212,10 +212,7 @@
              svg("line", { class: "edge-hit", x1, y1, x2, y2 }),
              svg("text", { class: "edge-rate", x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 7, "text-anchor": "middle" }),
              svg("title", {}, `${agentLabel(source)} → ${agentLabel(target)}: click to filter the feed`));
-    g.addEventListener("click", () => {
-      setFilter([source, target]);
-      setMaximized(trafficPane);
-    });
+    g.addEventListener("click", () => setFilter([source, target]));
     if (state.filter) g.classList.add("dim");
     edgeEls.set(key, g);
     edgesLayer.append(g);

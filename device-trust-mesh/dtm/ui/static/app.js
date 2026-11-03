@@ -492,8 +492,85 @@
     $(".maximize", pane).addEventListener("click", () =>
       setMaximized(pane.classList.contains("maximized") ? null : pane));
   }
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") setMaximized(null); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || document.querySelector("dialog[open]")) return;
+    setMaximized(null);
+  });
   $(".clear-filter", trafficPane).addEventListener("click", () => setFilter(null));
+
+  // ---- message viewer ----
+  const viewer = $("#message-viewer");
+  const viewerBody = $(".viewer-body", viewer);
+  const READABLE_FIELDS = {
+    task: ["task_type", "summary"],
+    decision: ["outcome", "policy_action", "risk_score", "rationale", "signal_ids", "method"],
+    status: ["state", "status_text"],
+  };
+  let viewerRequest = 0;
+
+  const isEmpty = (v) => v == null || v === "";
+  const fieldText = (v) => (typeof v === "object" ? JSON.stringify(v) : String(v));
+
+  function viewerNote(text) {
+    viewerBody.replaceChildren(el("p", { class: "viewer-note" }, text));
+  }
+
+  function copyJson(text, button) {
+    const done = () => { button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy JSON"; }, 1500); };
+    try {
+      navigator.clipboard.writeText(text).then(done, () => {});
+    } catch (err) {
+      // no clipboard access: the JSON stays selectable in the block
+    }
+  }
+
+  function renderMessage(message, row) {
+    const kind = message.kind;
+    const customer = (row.envelope && row.envelope.customer_id) || "—";
+    const head = el("h3", {}, `${agentLabel(message.source)} → ${agentLabel(message.target)}`);
+    const meta = el("p", { class: "viewer-meta" },
+      [kind, message.device_id, customer, hms(message.time_ms),
+       `${message.topic} @ ${message.partition}:${message.offset}`].join(" · "));
+    const list = el("dl", { class: "viewer-fields" });
+    for (const name of READABLE_FIELDS[kind] || []) {
+      if (isEmpty(row[name])) continue;
+      list.append(el("dt", {}, name), el("dd", {}, fieldText(row[name])));
+    }
+    const json = JSON.stringify(row, null, 2);
+    const copy = el("button", { type: "button", class: "viewer-copy" }, "Copy JSON");
+    copy.addEventListener("click", () => copyJson(json, copy));
+    viewerBody.replaceChildren(head, meta, list, copy, el("pre", { class: "viewer-json" }, json));
+  }
+
+  async function openMessage(messageId) {
+    const request = ++viewerRequest;
+    viewerNote("loading…");
+    if (!viewer.open) viewer.showModal();
+    try {
+      const response = await fetch(`/messages/${encodeURIComponent(messageId)}`);
+      const body = await response.json();
+      if (request !== viewerRequest) return;
+      if (response.status === 404) {
+        viewerNote(`no longer held — the UI keeps the most recent ${body.limit} messages`);
+      } else if (response.ok) {
+        renderMessage(body.message, body.row);
+      } else {
+        viewerNote("could not load the message");
+      }
+    } catch (err) {
+      if (request === viewerRequest) viewerNote("could not load the message");
+    }
+  }
+
+  function openFrom(e, selector) {
+    const target = e.target.closest(selector);
+    if (target && target.dataset.messageId) openMessage(target.dataset.messageId);
+  }
+
+  activityCards.addEventListener("click", (e) => openFrom(e, ".bubble"));
+  feedBody.addEventListener("click", (e) => openFrom(e, "tr.feed-row"));
+  $(".viewer-close", viewer).addEventListener("click", () => viewer.close());
+  viewer.addEventListener("click", (e) => { if (e.target === viewer) viewer.close(); });
 
   // ---- stream ----
   function onSnapshot(snap) {

@@ -93,6 +93,18 @@ class StaticFilesTest(unittest.TestCase):
         self.assertLess(html.index('"pane-pairs"'), html.index('"pane-traffic"'))
         self.assertLess(html.index('"pane-traffic"'), html.index('"pane-activity"'))
 
+    def test_message_viewer_dialog_and_fetch(self):
+        page = _Collector()
+        page.feed(_static_text("index.html"))
+        self.assertEqual(page.ids.count("message-viewer"), 1)
+        app_js = _static_text("app.js")
+        self.assertIn("/messages/${encodeURIComponent(", app_js)
+        self.assertIn("no longer held — the UI keeps the most recent", app_js)
+        self.assertIn("showModal()", app_js)
+
+    def test_escape_leaves_maximized_pane_while_a_dialog_is_open(self):
+        self.assertIn('document.querySelector("dialog[open]")', _static_text("app.js"))
+
     def test_static_assets_served_with_types(self):
         client = TestClient(build_app(Hub(Board()), lambda: {}))
         for name, media in (("app.js", "javascript"), ("style.css", "text/css")):

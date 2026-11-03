@@ -9,7 +9,7 @@ from dtm.ui.hub import Hub
 from dtm.ui.model import Board
 
 DOM_IDS = ("pane-devices", "pane-traffic", "pane-pairs", "summary", "devices-table", "traffic-graph",
-           "feed", "pairs-table")
+           "feed", "pairs-table", "pane-activity", "activity-cards")
 STATIC = ("index.html", "app.js", "style.css")
 
 
@@ -52,7 +52,7 @@ class StaticFilesTest(unittest.TestCase):
         for dom_id in DOM_IDS:
             with self.subTest(id=dom_id):
                 self.assertEqual(page.ids.count(dom_id), 1)
-        self.assertEqual(page.maximize_buttons, 3)
+        self.assertEqual(page.maximize_buttons, 4)
         self.assertIn("/static/app.js", page.scripts)
         self.assertIn("/static/style.css", page.stylesheets)
 
@@ -77,6 +77,21 @@ class StaticFilesTest(unittest.TestCase):
         app_js = _static_text("app.js")
         self.assertIn("Kafka record timestamp → applied in context-mcp", app_js)
         self.assertIn("`~${", app_js)
+
+    def test_activity_pane_holds_bubbles_and_links_rows(self):
+        app_js = _static_text("app.js")
+        self.assertIn("BUBBLE_HOLD_MS = 2000", app_js)
+        self.assertIn('"activity"', app_js)
+        self.assertIn("data-device-id", app_js)
+        for name in ("Risk", "Enrolment", "Step-up", "Compliance", "Revocation"):
+            with self.subTest(name=name):
+                self.assertIn(f'"{name}"', app_js)
+
+    def test_pairs_pane_sits_under_devices(self):
+        html = _static_text("index.html")
+        self.assertLess(html.index('"pane-devices"'), html.index('"pane-pairs"'))
+        self.assertLess(html.index('"pane-pairs"'), html.index('"pane-traffic"'))
+        self.assertLess(html.index('"pane-traffic"'), html.index('"pane-activity"'))
 
     def test_static_assets_served_with_types(self):
         client = TestClient(build_app(Hub(Board()), lambda: {}))

@@ -9,6 +9,7 @@
   const RESYNC_MS = 1000;
   const FEED_LIMIT = 500;
   const MAX_DOTS = 300;
+  const BUBBLE_HOLD_MS = 2000;
   const ROUTER = "dtm-a2a-task-router";
   const FRESHNESS_TIP = "measured at a 500 ms poll interval";
   const MATERIALIZATION_TIP = "Kafka record timestamp → applied in context-mcp; "
@@ -19,6 +20,8 @@
     [ROUTER, [80, 120]], ["risk", [235, 62]], ["enrolment", [395, 120]],
     ["compliance", [560, 45]], ["step-up", [560, 120]], ["revocation", [560, 195]],
   ]);
+  const AGENT_CARDS = [["risk", "Risk"], ["enrolment", "Enrolment"], ["step-up", "Step-up"],
+    ["compliance", "Compliance"], ["revocation", "Revocation"]];
   const NODE_LABELS = { [ROUTER]: "router" };
   const STALE_PANES = { kafka: ["pane-traffic", "pane-pairs"], context: ["pane-devices"] };
   const COLORS = [["red", "blocked"], ["amber", "step-up"], ["green", "trusted"], ["grey", "pending"]];
@@ -33,9 +36,13 @@
   const feedBody = $("#feed tbody");
   const pairsBody = $("#pairs-table tbody");
   const trafficPane = $("#pane-traffic");
+  const activityCards = $("#activity-cards");
 
   let state = freshState();
   const deviceRows = new Map();
+  // One entry per agent card: {agent, el, slot, tag, shown, shownAt, pending, timer}.
+  const cards = new Map();
+  let linked = null;
   const edgeEls = new Map();
   const nodeEls = new Map();
   let schedule = [];
@@ -103,14 +110,15 @@
     ordered.forEach((row, i) => {
       let tr = deviceRows.get(row.device_id);
       if (!tr) {
-        tr = el("tr");
+        tr = el("tr", { "data-device-id": row.device_id });
         tr.addEventListener("animationend", () => tr.classList.remove("flash"));
         for (const cls of ["", "", "", "reason", "", "num", "num fresh"]) tr.append(el("td", cls ? { class: cls } : {}));
         tr.cells[6].title = FRESHNESS_TIP;
         tr.cells[2].append(el("span", { class: "pill" }));
         deviceRows.set(row.device_id, tr);
       }
-      tr.className = `c-${row.color}${tr.classList.contains("flash") ? " flash" : ""}`;
+      const kept = ["flash", "linked"].filter((cls) => tr.classList.contains(cls));
+      tr.className = [`c-${row.color}`, ...kept].join(" ");
       tr.cells[0].textContent = row.device_id;
       tr.cells[1].textContent = row.customer_id || "—";
       const pill = tr.cells[2].firstChild;
@@ -346,6 +354,112 @@
     }));
   }
 
+  // ---- agent activity ----
+  const agentName = (agent) => (AGENT_CARDS.find(([key]) => key === agent) || [agent, agent])[1];
+
+  function cardFor(agent) {
+    let card = cards.get(agent);
+    if (card) return card;
+    const root = el("div", { class: "card", "data-agent": agent });
+    const slot = el("div", { class: "bubble-slot" });
+    const tag = el("span", { class: "tag" }, "disabled");
+    const label = el("div", { class: "card-label" }, `${agentName(agent)} Agent`);
+    label.append(tag);
+    root.append(slot, label);
+    card = { agent, el: root, slot, tag, shown: null, shownAt: 0, pending: null, timer: null };
+    cards.set(agent, card);
+    activityCards.append(root);
+    paintCard(card);
+    return card;
+  }
+
+  function linkRow(bubble, deviceId) {
+    unlinkRow();
+    const row = devicesBody.querySelector(`tr[data-device-id="${CSS.escape(deviceId)}"]`);
+    if (!row) return;
+    row.classList.add("linked");
+    row.scrollIntoView({ block: "nearest" });
+    linked = { row, bubble };
+  }
+
+  function unlinkRow() {
+    if (linked) linked.row.classList.remove("linked");
+    linked = null;
+  }
+
+  function bubbleEl(b) {
+    const node = el("div", { class: `bubble b-${b.color}`, "data-message-id": b.message_id });
+    const line = (label, value) => {
+      const div = el("div", { class: "line" });
+      div.append(el("b", {}, label), value);
+      return div;
+    };
+    node.append(line("To:", b.to), line("Customer:", b.customer_id || "—"), line("Device:", b.device_id),
+                line("Action:", b.action));
+    node.addEventListener("mouseenter", () => linkRow(node, b.device_id));
+    node.addEventListener("mouseleave", unlinkRow);
+    return node;
+  }
+
+  function paintCard(card) {
+    if (linked && card.slot.contains(linked.bubble)) unlinkRow();
+    const b = card.shown;
+    const disabled = !b && card.agent === "revocation";
+    card.el.classList.toggle("disabled", disabled);
+    card.tag.hidden = !disabled;
+    card.slot.replaceChildren(b ? bubbleEl(b) : el("div", { class: "waiting" }, "waiting for activity"));
+  }
+
+  function showBubble(card, b) {
+    card.shown = b;
+    card.shownAt = performance.now();
+    paintCard(card);
+  }
+
+  // A bubble stays up for at least BUBBLE_HOLD_MS; a newer one arriving sooner waits as the card's single
+  // pending bubble, replacing any earlier pending one, and shows when the hold elapses.
+  function offerBubble(b) {
+    const card = cardFor(b.agent);
+    if ((card.shown && card.shown.message_id === b.message_id)
+        || (card.pending && card.pending.message_id === b.message_id)) return;
+    const remaining = card.shown ? BUBBLE_HOLD_MS - (performance.now() - card.shownAt) : 0;
+    if (remaining <= 0) {
+      clearTimeout(card.timer);
+      card.timer = null;
+      card.pending = null;
+      showBubble(card, b);
+      return;
+    }
+    card.pending = b;
+    if (card.timer === null) {
+      card.timer = setTimeout(() => {
+        card.timer = null;
+        const next = card.pending;
+        card.pending = null;
+        if (next) showBubble(card, next);
+      }, remaining);
+    }
+  }
+
+  function renderActivity(activity) {
+    for (const [agent, card] of cards) {
+      clearTimeout(card.timer);
+      card.timer = null;
+      card.pending = null;
+      if (!(agent in activity) && !AGENT_CARDS.some(([key]) => key === agent)) {
+        card.el.remove();
+        cards.delete(agent);
+      }
+    }
+    for (const [agent] of AGENT_CARDS) cardFor(agent);
+    for (const agent of Object.keys(activity)) cardFor(agent);
+    for (const [agent, card] of cards) {
+      card.shown = activity[agent] || null;
+      card.shownAt = performance.now();
+      paintCard(card);
+    }
+  }
+
   // ---- stale banners ----
   function renderStale() {
     const since = { "pane-devices": [], "pane-traffic": [], "pane-pairs": [] };
@@ -392,6 +506,7 @@
     state.pairs = snap.pairs;
     state.summary = snap.summary;
     state.stale = { ...state.stale, ...snap.stale };
+    renderActivity(snap.activity || {});
     renderDevices(new Set());
     renderSummary();
     renderPairs();
@@ -418,6 +533,8 @@
       } else if (type === "summary") {
         state.summary = data;
         dirty.add("summary");
+      } else if (type === "activity") {
+        offerBubble(data);
       } else if (type === "stale") {
         state.stale[data.source] = data.since_ms;
         dirty.add("stale");
@@ -478,5 +595,6 @@
 
   resetGraph();
   renderEmpty();
+  renderActivity({});
   requestAnimationFrame(frame);
 })();

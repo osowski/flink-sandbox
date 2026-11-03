@@ -147,7 +147,7 @@ class Board:
     def apply_task(self, value: dict, coord: Coord) -> list[Delta]:
         """Fold in an ``agent.tasks_human_readable`` row and remember who asked, for later replies.
 
-        Replies that arrived before this task had no target; each gets its sender now, as a ``message_target`` delta.
+        A reply that arrived before its task gets its sender here, as a ``message_target`` delta.
         """
         with self._lock:
             envelope = value["envelope"]

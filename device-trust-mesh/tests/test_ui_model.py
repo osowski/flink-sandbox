@@ -294,10 +294,37 @@ class ActivityTest(unittest.TestCase):
         bubble = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT"))
         self.assertEqual((bubble["to"], bubble["action"], bubble["color"]),
                          ("Enrolment", "decide enrolment", "neutral"))
+
+    def test_late_risk_score_enriches_the_hand_off_bubble(self):
+        bubble = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT"))
         late = artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None,
                         risk_score=72)
+        self.assertEqual(kinds(late), ["message", "activity"])
+        self.assertEqual(bubble_of(late), {**bubble, "action": "decide enrolment · risk 72"})
+        self.assertEqual(self.board.snapshot()["activity"]["risk"], bubble_of(late))
+
+    def test_redelivered_late_risk_score_adds_no_bubble(self):
+        hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT")
+        artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None, risk_score=72)
+        again = artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None,
+                         risk_score=72)
+        self.assertIsNone(bubble_of(again))
+
+    def test_late_risk_score_for_another_correlation_adds_no_bubble(self):
+        bubble = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT", corr="C"))
+        late = artifact(self.board, "d-1", "risk", "risk-assessment", corr="other", outcome=None,
+                        policy_action=None, risk_score=72)
         self.assertIsNone(bubble_of(late))
         self.assertEqual(self.board.snapshot()["activity"]["risk"], bubble)
+
+    def test_late_risk_score_after_the_bubble_moved_on_adds_no_bubble(self):
+        hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT", corr="C")
+        moved = bubble_of(artifact(self.board, "d-3", "risk", "enrolment-decision", corr="other", outcome="X",
+                                   policy_action=None))
+        late = artifact(self.board, "d-1", "risk", "risk-assessment", corr="C", outcome=None,
+                        policy_action=None, risk_score=72)
+        self.assertIsNone(bubble_of(late))
+        self.assertEqual(self.board.snapshot()["activity"]["risk"], moved)
 
     def test_score_is_held_per_correlation(self):
         artifact(self.board, "d-1", "risk", "risk-assessment", corr="C", outcome=None, policy_action=None,
@@ -319,9 +346,14 @@ class ActivityTest(unittest.TestCase):
         self.assertEqual((bubble["agent"], bubble["to"], bubble["action"], bubble["color"]),
                          ("enrolment", "Step-up", "CHALLENGED → verify identity", "amber"))
 
+    def test_step_up_hand_off_from_enrolment_is_a_challenge_without_its_decision(self):
+        bubble = bubble_of(hand_off(self.board, "t-3", "enrolment", "step-up", "STEP_UP"))
+        self.assertEqual((bubble["to"], bubble["action"], bubble["color"]),
+                         ("Step-up", "CHALLENGED → verify identity", "amber"))
+
     def test_challenge_after_its_hand_off_sets_no_bubble(self):
         bubble = bubble_of(hand_off(self.board, "t-3", "enrolment", "step-up", "STEP_UP"))
-        self.assertEqual(bubble["action"], "verify identity")
+        self.assertEqual(bubble["action"], "CHALLENGED → verify identity")
         late = artifact(self.board, "d-2", "enrolment", "enrolment-decision", outcome="CHALLENGED",
                         policy_action="CHALLENGE")
         self.assertIsNone(bubble_of(late))
@@ -371,21 +403,35 @@ class ActivityTest(unittest.TestCase):
                                   policy_action=None, method=None))
         self.assertEqual(bare["action"], "challenge")
 
-    def test_audit_record_goes_to_the_audit_log(self):
-        bubble = bubble_of(artifact(self.board, "d-9", "compliance", "audit-record", outcome="GRANTED",
-                                    policy_action=None))
+    def audit(self, message_id, subject_id, outcome=None):
+        return bubble_of(artifact(self.board, message_id, "compliance", "audit-record", causation_id=subject_id,
+                                  outcome=outcome, policy_action=None, risk_score=None))
+
+    def test_audit_record_goes_to_the_audit_log_with_its_subject_outcome(self):
+        artifact(self.board, "d-3", "enrolment", "enrolment-decision", outcome="GRANTED", policy_action="ALLOW")
+        bubble = self.audit("d-9", "d-3")
         self.assertEqual((bubble["agent"], bubble["to"], bubble["action"], bubble["color"]),
                          ("compliance", "audit log", "audited GRANTED", "neutral"))
-        bare = bubble_of(artifact(self.board, "d-10", "compliance", "audit-record", outcome=None,
-                                  policy_action=None))
-        self.assertEqual(bare["action"], "audited")
+
+    def test_audit_of_a_step_up_challenge_names_its_method(self):
+        artifact(self.board, "d-7", "step-up", "step-up-challenge", outcome=None, policy_action=None,
+                 method="OTP")
+        self.assertEqual(self.audit("d-9", "d-7")["action"], "audited OTP")
+
+    def test_audit_of_an_unheld_or_bare_subject_is_plain(self):
+        self.assertEqual(self.audit("d-9", "never-seen")["action"], "audited")
+        artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None, risk_score=7)
+        self.assertEqual(self.audit("d-10", "d-1")["action"], "audited")
+
+    def test_audit_with_its_own_outcome_prefers_it(self):
+        artifact(self.board, "d-3", "enrolment", "enrolment-decision", outcome="GRANTED", policy_action="ALLOW")
+        self.assertEqual(self.audit("d-9", "d-3", outcome="DENIED")["action"], "audited DENIED")
 
     def test_audit_of_a_challenge_is_not_held_as_a_challenge(self):
-        bubble = bubble_of(artifact(self.board, "d-9", "compliance", "audit-record", outcome="CHALLENGED",
-                                    policy_action=None))
+        bubble = self.audit("d-9", "never-seen", outcome="CHALLENGED")
         self.assertEqual(bubble["action"], "audited CHALLENGED")
-        later = bubble_of(hand_off(self.board, "t-3", "enrolment", "step-up", "STEP_UP"))
-        self.assertEqual(later["action"], "verify identity")
+        later = bubble_of(hand_off(self.board, "t-3", "enrolment", "revocation", "REVOKE"))
+        self.assertEqual(later["action"], "revoke trust")
 
     def test_reply_with_unseen_requester_still_bubbles(self):
         bubble = bubble_of(artifact(self.board, "d-3", "enrolment", "enrolment-decision",

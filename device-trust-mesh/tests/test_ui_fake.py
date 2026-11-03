@@ -29,19 +29,25 @@ def run(seconds: float, **kwargs):
     return board, deltas
 
 
-def capture(seconds: float):
-    """Play the feed and return the raw task and decision values the board was handed."""
+def capture(seconds: float, arrivals: list | None = None):
+    """Play the feed and return the raw task and decision values the board was handed.
+
+    ``arrivals``, when given, collects ``(kind, value)`` for both in the order the board saw them.
+    """
     clock = Clock()
     board = Board(clock=clock)
     tasks, decisions = [], []
+    arrivals = [] if arrivals is None else arrivals
     apply_task, apply_decision = board.apply_task, board.apply_decision
 
     def record_task(value, coord):
         tasks.append(value)
+        arrivals.append(("task", value))
         return apply_task(value, coord)
 
     def record_decision(value, coord):
         decisions.append(value)
+        arrivals.append(("decision", value))
         return apply_decision(value, coord)
 
     board.apply_task, board.apply_decision = record_task, record_decision
@@ -121,16 +127,45 @@ class FakeFeedTest(unittest.TestCase):
                 replies = [a for a in audits if a["envelope"]["causation_id"] == d["envelope"]["message_id"]]
                 self.assertEqual(len(replies), 1)
                 self.assertEqual(replies[0]["agent"], "compliance")
-                self.assertEqual(replies[0]["outcome"], d["outcome"] or d["method"])
+                self.assertIsNone(replies[0]["outcome"])
         self.assertEqual(len(audits), len(audited))
 
-    def test_risk_assessment_carries_signal_ids_unless_clean(self):
+    def test_compliance_bubbles_name_the_audited_outcome(self):
+        actions = {b["action"] for b in self.of("activity") if b["agent"] == "compliance"}
+        self.assertLessEqual({"audited GRANTED", "audited OTP", "audited"}, actions)
+
+    def test_some_risk_assessments_arrive_after_their_hand_off(self):
+        arrivals = []
+        capture(30, arrivals)
+        hand_offs, late = set(), 0
+        for kind, v in arrivals:
+            corr = v["envelope"]["correlation_id"]
+            if kind == "task" and v["task_type"] == "DECIDE_ENROLMENT":
+                hand_offs.add(corr)
+            elif kind == "decision" and v["artifact_name"] == "risk-assessment":
+                late += corr in hand_offs
+        self.assertGreaterEqual(late, 1)
+        self.assertLess(late, len(hand_offs))
+
+    def test_late_risk_score_enriches_the_risk_bubble_in_place(self):
+        actions: dict[str, list[str]] = {}
+        for b in self.of("activity"):
+            if b["agent"] == "risk":
+                actions.setdefault(b["message_id"], []).append(b["action"])
+        enriched = [a for a in actions.values() if len(a) > 1]
+        self.assertTrue(enriched)
+        for a in enriched:
+            with self.subTest(actions=a):
+                self.assertEqual(a[0], "decide enrolment")
+                self.assertRegex(a[1], r"^decide enrolment · risk \d+$")
+
+    def test_risk_assessment_signal_ids_are_empty_when_clean(self):
         _, decisions = capture(30)
         by_rationale = {}
         for d in decisions:
             if d["artifact_name"] == "risk-assessment":
                 by_rationale[d["rationale"]] = d["signal_ids"]
-        self.assertIsNone(by_rationale["CLEAN signals"])
+        self.assertEqual(json.loads(by_rationale["CLEAN signals"]), [])
         self.assertEqual(json.loads(by_rationale["OUTDATED_OS signals"]), ["OUTDATED_OS"])
 
     def test_step_up_challenge_carries_a_method(self):

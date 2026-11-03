@@ -21,6 +21,7 @@ STEP_UP_CHALLENGE = "step-up-challenge"
 AUDIT_RECORD = "audit-record"
 CHALLENGED = "CHALLENGED"
 ROUTER = "dtm-a2a-task-router"
+STEP_UP_HAND_OFF = ("enrolment", "step-up", "STEP_UP")
 STALE_SOURCES = ("kafka", "context")
 RATIONALE_CHARS = 80
 REQUESTER_FACTOR = 4
@@ -112,6 +113,7 @@ class Board:
         self._rows: OrderedDict[str, dict] = OrderedDict()
         self._held: OrderedDict[str, dict] = OrderedDict()
         self._activity: dict[str, dict] = {}
+        self._hand_offs: dict[str, tuple[str, dict]] = {}
         self._pair_windows: dict[int, dict[tuple[str, str], tuple[int, int]]] = {}
         self._decision_window: list[tuple[int, float]] = []
         self._freshness_window: list[tuple[int, float]] = []
@@ -149,7 +151,10 @@ class Board:
                 self._requesters.popitem(last=False)
             deltas = [self._message("task", value, value.get("from_agent"), value.get("to_agent"),
                                     message_id, coord)]
-            return deltas + self._activity_delta(self._task_bubble(value, message_id))
+            bubble = self._task_bubble(value, message_id)
+            if bubble is not None:
+                self._hand_offs[bubble["agent"]] = (message_id, json_safe(value))
+            return deltas + self._activity_delta(bubble)
 
     def apply_decision(self, value: dict, coord: Coord) -> list[Delta]:
         """Fold in an ``agent.decisions_human_readable`` row, targeted at the agent that asked."""
@@ -306,30 +311,37 @@ class Board:
         return "message", dict(message)
 
     def _task_bubble(self, value: dict, message_id: str) -> dict | None:
-        """Return the speech bubble a hand-off sets for its sender, or None for the router."""
+        """Return the speech bubble a hand-off sets for its sender, or None for the router.
+
+        Enrolment hands off to step-up only on a challenge, so that hand-off is always shown as one.
+        """
         sender = value.get("from_agent")
         if not sender or sender == ROUTER:
             return None
         task_type = value.get("task_type")
+        to_agent = value.get("to_agent")
         purpose = TASK_PURPOSE.get(task_type, (task_type or "task").lower().replace("_", " "))
         held = self._held.get(value["envelope"].get("correlation_id"), {})
         action, color = purpose, "neutral"
         if sender == "risk" and held.get("risk_score") is not None:
             action = f"{purpose} · risk {held['risk_score']}"
-        elif held.get("challenged"):
+        elif (sender, to_agent, task_type) == STEP_UP_HAND_OFF or held.get("challenged"):
             action, color = f"{CHALLENGED} → {purpose}", "amber"
-        to_agent = value.get("to_agent")
         return self._bubble(sender, AGENT_NAMES.get(to_agent, to_agent or "—"), action, color, value, message_id)
 
     def _decision_bubble(self, value: dict, target: str | None) -> dict | None:
-        """Return the speech bubble an artifact sets for its agent; an enrichment is held for the hand-off instead."""
+        """Return the speech bubble an artifact sets for its agent; an enrichment is held for the hand-off instead.
+
+        A risk score that arrives after its hand-off returns that hand-off's bubble, enriched. An audit record
+        names the outcome, else the method, of the artifact it audits, its causation.
+        """
         agent = value.get("agent")
         artifact_name = value.get("artifact_name")
         outcome, policy_action = value.get("outcome"), value.get("policy_action")
         message_id = value["envelope"]["message_id"]
         if artifact_name == RISK_ASSESSMENT:
             self._hold(value, risk_score=value.get("risk_score"))
-            return None
+            return self._enriched_hand_off("risk", value["envelope"].get("correlation_id"))
         if not agent:
             return None
         if artifact_name == STEP_UP_CHALLENGE:
@@ -337,7 +349,8 @@ class Board:
             action = f"challenge → {method}" if method else "challenge"
             return self._bubble(agent, "device", action, "amber", value, message_id)
         if artifact_name == AUDIT_RECORD:
-            audited = value.get("outcome")
+            subject = self._rows.get(value["envelope"].get("causation_id"), {}).get("row", {})
+            audited = outcome or subject.get("outcome") or subject.get("method")
             return self._bubble(agent, "audit log", f"audited {audited}" if audited else "audited",
                                 "neutral", value, message_id)
         if outcome == CHALLENGED:
@@ -346,6 +359,14 @@ class Board:
         to = "device" if policy_action else AGENT_NAMES.get(target, target) if target else "—"
         action = " → ".join(p for p in (outcome, policy_action) if p) or artifact_name or "decision"
         return self._bubble(agent, to, action, ACTION_COLORS.get(policy_action, "neutral"), value, message_id)
+
+    def _enriched_hand_off(self, agent: str, correlation_id: str | None) -> dict | None:
+        """Return ``agent``'s hand-off bubble on ``correlation_id`` rebuilt with what is held, if that changes it."""
+        message_id, hand_off = self._hand_offs.get(agent, (None, None))
+        if hand_off is None or correlation_id is None or hand_off["envelope"].get("correlation_id") != correlation_id:
+            return None
+        bubble = self._task_bubble(hand_off, message_id)
+        return None if bubble == self._activity.get(agent) else bubble
 
     def _hold(self, value: dict, **fields) -> None:
         """Keep an enrichment for the hand-off on the same correlation, which may already have passed."""
@@ -366,10 +387,16 @@ class Board:
                 "time_ms": to_epoch_ms(envelope["event_time"])}
 
     def _activity_delta(self, bubble: dict | None) -> list[Delta]:
-        """Record ``bubble`` as its agent's latest and return its delta, or nothing when there is none."""
+        """Record ``bubble`` as its agent's latest and return its delta, or nothing when there is none.
+
+        The agent's hand-off is kept for a later enrichment only while its bubble is that hand-off's.
+        """
         if bubble is None:
             return []
-        self._activity[bubble["agent"]] = bubble
+        agent = bubble["agent"]
+        if self._hand_offs.get(agent, (None,))[0] != bubble["message_id"]:
+            self._hand_offs.pop(agent, None)
+        self._activity[agent] = bubble
         return [("activity", dict(bubble))]
 
     def _observe(self, window: list, at_ms: int, value: float) -> None:

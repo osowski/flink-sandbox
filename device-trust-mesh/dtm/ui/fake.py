@@ -7,8 +7,10 @@ an ``envelope`` for tasks, decisions and statuses, ``agent.decision_latency`` ro
 and an ``agent.pair_counts`` window every 5 s. The first leg runs router → risk → enrolment and, for a
 challenge, enrolment → step-up; the router resumes a challenged enrolment by sending to enrolment once the
 device answers. Compliance is sent no tasks: it observes every risk-assessment, enrolment-decision and
-step-up-challenge and answers each with an ``audit-record``. Task types, artifact names and artifact fields
-are the ones the real agents emit. Nothing here touches Kafka or HTTP.
+step-up-challenge and answers each with an ``audit-record`` whose outcome is null. Task types, artifact names
+and artifact fields are the ones the real agents emit. The task and decision views commit independently, so
+every ``LATE_RISK_EVERY``-th conversation delivers its risk-assessment after the hand-off it led to. Nothing
+here touches Kafka or HTTP.
 """
 import heapq
 import itertools
@@ -50,6 +52,8 @@ SCENARIOS = ("CLEAN", "OUTDATED_OS", "COMPROMISED_OS", "CLEAN", "NEW_DEVICE_ESTA
              "CLEAN", "IMPOSSIBLE_TRAVEL", "CLEAN")
 _BLOCKING = {"COMPROMISED_OS": "Compromised OS fingerprint", "IMPOSSIBLE_TRAVEL": "Impossible travel"}
 AUDIT_DELAY_MS = 150
+LATE_RISK_EVERY = 3
+LATE_RISK_MS = 400
 
 Action = Callable[[int], list[Delta]]
 
@@ -78,6 +82,7 @@ class FakeFeed:
         self._sent: deque[tuple[int, str, str]] = deque()
         self._lags: deque[int] = deque(maxlen=200)
         self._scenarios = itertools.cycle(SCENARIOS)
+        self._conversations = itertools.count(1)
         self._now_ms: int | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -173,9 +178,10 @@ class FakeFeed:
                              f"Assess enrolment risk for {device_id} (customer {customer_id})")
         score = 85 if scenario in _BLOCKING else 55 if scenario == "OUTDATED_OS" else 12
         assessed_at = t + self._jitter(500)
-        self._reply(assessed_at, device_id, seq, corr, to_risk, "risk", "risk-assessment",
-                    outcome=None, policy_action=None, risk_score=score, rationale=f"{scenario} signals",
-                    signal_ids=None if scenario == "CLEAN" else json.dumps([scenario]))
+        late = next(self._conversations) % LATE_RISK_EVERY == 0
+        self._reply(assessed_at + 100 + LATE_RISK_MS if late else assessed_at, device_id, seq, corr, to_risk,
+                    "risk", "risk-assessment", outcome=None, policy_action=None, risk_score=score,
+                    rationale=f"{scenario} signals", signal_ids=json.dumps([] if scenario == "CLEAN" else [scenario]))
         to_enrolment = self._task(assessed_at + 100, device_id, seq, corr, "risk", "enrolment",
                                   "DECIDE_ENROLMENT", f"Decide enrolment for {device_id}: risk {score}")
         decide_at = t + self._jitter(1800)
@@ -277,7 +283,7 @@ class FakeFeed:
                                                                     self._coord(STATUSES, device_id, due_ms)))
         if artifact_name != "audit-record":
             self._reply(at_ms + AUDIT_DELAY_MS, device_id, seq, corr, message_id, "compliance", "audit-record",
-                        outcome=outcome or method, policy_action=None, risk_score=None,
+                        outcome=None, policy_action=None, risk_score=None,
                         rationale=f"{artifact_name} recorded")
         return message_id
 

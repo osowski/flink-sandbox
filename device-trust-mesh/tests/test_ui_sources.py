@@ -347,22 +347,32 @@ class LagTest(unittest.TestCase):
     def test_lag_quantiles_from_delta(self):
         previous = {50.0: 0, 100.0: 0, math.inf: 0}
         current = {50.0: 6, 100.0: 10, math.inf: 10}
-        self.assertEqual(lag_quantiles(previous, current), (50.0, 100.0))
+        self.assertEqual(lag_quantiles(previous, current), ((50.0, False), (100.0, False)))
 
     def test_lag_quantiles_uses_change_not_totals(self):
         previous = {50.0: 100, 100.0: 100, math.inf: 100}
         current = {50.0: 100, 100.0: 110, math.inf: 110}
-        self.assertEqual(lag_quantiles(previous, current), (100.0, 100.0))
+        self.assertEqual(lag_quantiles(previous, current), ((100.0, False), (100.0, False)))
 
     def test_lag_quantiles_tail_in_inf(self):
         previous = {50.0: 0, math.inf: 0}
         current = {50.0: 9, math.inf: 10}
-        self.assertEqual(lag_quantiles(previous, current), (50.0, math.inf))
+        self.assertEqual(lag_quantiles(previous, current), ((50.0, False), (50.0, True)))
+
+    def test_lag_quantiles_are_always_finite(self):
+        previous = {50.0: 0, 100.0: 0, math.inf: 0}
+        current = {50.0: 0, 100.0: 0, math.inf: 4}
+        for quantile in lag_quantiles(previous, current):
+            self.assertEqual(quantile, (100.0, True))
+            self.assertTrue(math.isfinite(quantile[0]))
+
+    def test_lag_quantiles_with_no_finite_bound_is_none(self):
+        self.assertEqual(lag_quantiles({math.inf: 0}, {math.inf: 4}), ((None, False), (None, False)))
 
     def test_lag_quantiles_no_change_is_none(self):
         same = {50.0: 3, math.inf: 3}
-        self.assertEqual(lag_quantiles(same, dict(same)), (None, None))
-        self.assertEqual(lag_quantiles(None, same), (None, None))
+        self.assertEqual(lag_quantiles(same, dict(same)), ((None, False), (None, False)))
+        self.assertEqual(lag_quantiles(None, same), ((None, False), (None, False)))
 
 
 DEVICE = {"device_id": "dev-0001", "customer_id": "c-1", "trust_status": "TRUSTED", "context_seq": 1,
@@ -460,7 +470,8 @@ class PollerTest(unittest.TestCase):
             p.poll_once()
         self.assertEqual(len(scrapes), 2)
         lags = [c for c in p._board.calls if c[0] == "apply_context_lag"]
-        self.assertEqual(lags, [("apply_context_lag", None, None), ("apply_context_lag", 50.0, 50.0)])
+        self.assertEqual(lags, [("apply_context_lag", None, None, False, False),
+                                ("apply_context_lag", 50.0, 50.0, False, False)])
         self.assertEqual([c[0] for c in p._board.calls].count("apply_devices"), 6)
 
     def test_metrics_failure_does_not_mark_context_stale(self):

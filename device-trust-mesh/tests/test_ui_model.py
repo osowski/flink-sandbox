@@ -431,7 +431,13 @@ class LatencyTest(unittest.TestCase):
         deltas = self.board.apply_context_lag(12.0, 80.5)
         summary = payload(deltas, "summary")
         self.assertEqual((summary["context_lag_p50_ms"], summary["context_lag_p95_ms"]), (12.0, 80.5))
+        self.assertEqual((summary["context_lag_p50_over"], summary["context_lag_p95_over"]), (False, False))
         self.assertEqual(self.board.snapshot()["summary"], summary)
+
+    def test_context_lag_over_flags(self):
+        deltas = self.board.apply_context_lag(60000.0, 60000.0, p50_over=False, p95_over=True)
+        summary = payload(deltas, "summary")
+        self.assertEqual((summary["context_lag_p50_over"], summary["context_lag_p95_over"]), (False, True))
 
 
 class StaleTest(unittest.TestCase):
@@ -457,7 +463,8 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(snap["summary"], {
             "device_count": 0, "by_color": {"red": 0, "green": 0, "amber": 0, "grey": 0},
             "decision_p50_ms": None, "decision_p95_ms": None, "freshness_p50_ms": None,
-            "freshness_p95_ms": None, "context_lag_p50_ms": None, "context_lag_p95_ms": None})
+            "freshness_p95_ms": None, "context_lag_p50_ms": None, "context_lag_p95_ms": None,
+            "context_lag_p50_over": False, "context_lag_p95_over": False})
         self.assertEqual(snap["stale"], {"kafka": None, "context": None})
 
     def test_snapshot_is_a_copy(self):

@@ -12,7 +12,7 @@ import os
 import threading
 import time
 import uuid
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import confluent_kafka
 import httpx
@@ -273,21 +273,36 @@ def parse_lag_buckets(metrics_text: str) -> dict[float, float]:
     return buckets
 
 
-def lag_quantiles(previous: dict[float, float] | None,
-                  current: dict[float, float]) -> tuple[float | None, float | None]:
-    """Return the p50 and p95 of the observations between two scrapes, or ``(None, None)`` if there are none.
+class LagQuantile(NamedTuple):
+    """A lag quantile in ms and whether it lies above the largest finite histogram bound.
 
-    Each is the smallest bucket bound whose cumulative count grew by at least its share of the total growth.
+    ``value_ms`` is always finite or None; when ``over`` is set it is that largest bound, a floor on the lag.
+    """
+    value_ms: float | None
+    over: bool
+
+
+_NO_QUANTILE = LagQuantile(None, False)
+
+
+def lag_quantiles(previous: dict[float, float] | None,
+                  current: dict[float, float]) -> tuple[LagQuantile, LagQuantile]:
+    """Return the p50 and p95 of the observations between two scrapes, empty if there are none.
+
+    Each is the smallest bucket bound whose cumulative count grew by at least its share of the total growth;
+    one that falls in the ``+Inf`` bucket is reported as the largest finite bound with ``over`` set.
     """
     if previous is None:
-        return None, None
+        return _NO_QUANTILE, _NO_QUANTILE
     growth = {le: count - previous.get(le, 0.0) for le, count in sorted(current.items())}
     total = growth.get(math.inf, max(growth.values(), default=0.0))
-    if total <= 0:
-        return None, None
+    finite = [le for le in growth if math.isfinite(le)]
+    if total <= 0 or not finite:
+        return _NO_QUANTILE, _NO_QUANTILE
 
-    def quantile(q: float) -> float:
-        return next((le for le, grown in growth.items() if grown >= q * total), math.inf)
+    def quantile(q: float) -> LagQuantile:
+        bound = next((le for le in finite if growth[le] >= q * total), None)
+        return LagQuantile(finite[-1], True) if bound is None else LagQuantile(bound, False)
 
     return quantile(0.5), quantile(0.95)
 
@@ -352,4 +367,4 @@ class ContextPoller(_Worker):
             return []
         p50, p95 = lag_quantiles(self._previous_buckets, current)
         self._previous_buckets = current
-        return self._board.apply_context_lag(p50, p95)
+        return self._board.apply_context_lag(p50.value_ms, p95.value_ms, p50.over, p95.over)

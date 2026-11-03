@@ -90,6 +90,7 @@ class Board:
         self._decision_window: list[tuple[int, float]] = []
         self._freshness_window: list[tuple[int, float]] = []
         self._context_lag: tuple[float | None, float | None] = (None, None)
+        self._context_lag_over: tuple[bool, bool] = (False, False)
         self._stale: dict[str, int | None] = dict.fromkeys(STALE_SOURCES)
 
     def apply_devices(self, rows: list[dict], polled_at_ms: int) -> list[Delta]:
@@ -173,10 +174,16 @@ class Board:
             row.update(self._latency_fields(row))
             return [("device", dict(row)), ("summary", self._summary())]
 
-    def apply_context_lag(self, p50_ms: float | None, p95_ms: float | None) -> list[Delta]:
-        """Record context-mcp's own materialization lag percentiles."""
+    def apply_context_lag(self, p50_ms: float | None, p95_ms: float | None,
+                          p50_over: bool = False, p95_over: bool = False) -> list[Delta]:
+        """Record context-mcp's own materialization lag percentiles.
+
+        Values are finite or None, since they go out as JSON; an ``over`` flag says the true lag is above
+        that value.
+        """
         with self._lock:
             self._context_lag = (p50_ms, p95_ms)
+            self._context_lag_over = (p50_over, p95_over)
             return [("summary", self._summary())]
 
     def mark_stale(self, source: str, since_ms: int) -> list[Delta]:
@@ -292,7 +299,9 @@ class Board:
         return {"device_count": len(self._devices), "by_color": by_color,
                 "decision_p50_ms": percentile(decisions, 50), "decision_p95_ms": percentile(decisions, 95),
                 "freshness_p50_ms": percentile(freshness, 50), "freshness_p95_ms": percentile(freshness, 95),
-                "context_lag_p50_ms": self._context_lag[0], "context_lag_p95_ms": self._context_lag[1]}
+                "context_lag_p50_ms": self._context_lag[0], "context_lag_p95_ms": self._context_lag[1],
+                "context_lag_p50_over": self._context_lag_over[0],
+                "context_lag_p95_over": self._context_lag_over[1]}
 
     @staticmethod
     def _check_source(source: str) -> None:

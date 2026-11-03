@@ -1,10 +1,22 @@
 import asyncio
 import json
+import math
 import threading
 import unittest
 
+import httpx
+
 from dtm.ui.hub import Hub
 from dtm.ui.model import Board
+from dtm.ui.sources import ContextPoller
+
+
+def refuse_constant(name):
+    raise AssertionError(f"non-finite JSON constant {name}")
+
+
+def strict_loads(text):
+    return json.loads(text, parse_constant=refuse_constant)
 
 
 class HubTest(unittest.IsolatedAsyncioTestCase):
@@ -108,6 +120,52 @@ class HubTest(unittest.IsolatedAsyncioTestCase):
         hub.publish_threadsafe([("x", {})])
         await asyncio.sleep(0.01)
         self.assertEqual(hub.subscriber_count(), 0)
+
+
+    async def test_lag_over_the_top_bucket_stays_strict_json(self):
+        scrapes = iter(['dtm_materialization_lag_ms_bucket{le="50.0",topic="t"} 0\n'
+                        'dtm_materialization_lag_ms_bucket{le="+Inf",topic="t"} 0\n',
+                        'dtm_materialization_lag_ms_bucket{le="50.0",topic="t"} 0\n'
+                        'dtm_materialization_lag_ms_bucket{le="+Inf",topic="t"} 7\n'])
+
+        def handler(request):
+            if request.url.path.endswith("/metrics"):
+                return httpx.Response(200, text=next(scrapes))
+            return httpx.Response(200, json=[])
+        hub = self.make_hub(batch_ms=10)
+        poller = ContextPoller(hub._board, httpx.Client(transport=httpx.MockTransport(handler)),
+                               hub.publish_threadsafe, "http://context.test", metrics_every=1,
+                               clock=lambda: 1000.0)
+        sub = hub.subscribe()
+        try:
+            await asyncio.wait_for(anext(sub), 2)
+            poller.poll_once()
+            poller.poll_once()
+            batch = await asyncio.wait_for(anext(sub), 2)
+        finally:
+            await sub.aclose()
+        summaries = [d["data"] for d in strict_loads(batch["data"]) if d["type"] == "summary"]
+        self.assertTrue(summaries)
+        self.assertEqual(summaries[-1]["context_lag_p95_ms"], 50.0)
+        self.assertTrue(summaries[-1]["context_lag_p95_over"])
+        late = hub.subscribe()
+        try:
+            snapshot = await asyncio.wait_for(anext(late), 2)
+        finally:
+            await late.aclose()
+        summary = strict_loads(snapshot["data"])["summary"]
+        self.assertEqual((summary["context_lag_p95_ms"], summary["context_lag_p95_over"]), (50.0, True))
+
+    async def test_non_finite_value_is_rejected_not_written(self):
+        hub = self.make_hub(batch_ms=10)
+        sub = hub.subscribe()
+        try:
+            await asyncio.wait_for(anext(sub), 2)
+            hub.publish_threadsafe([("t", {"n": math.inf})])
+            with self.assertRaises(ValueError):
+                await asyncio.wait_for(anext(sub), 2)
+        finally:
+            await sub.aclose()
 
 
 class UnboundHubTest(unittest.TestCase):

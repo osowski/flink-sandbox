@@ -6,6 +6,7 @@
   // Flink commits arrive in bursts, so a batch's dots are spread over at most this long to keep the graph moving.
   const SPREAD_MS = 10000;
   const DOT_MS = 1400;
+  const RESYNC_MS = 1000;
   const FEED_LIMIT = 500;
   const MAX_DOTS = 300;
   const ROUTER = "dtm-a2a-task-router";
@@ -134,8 +135,9 @@
     kpi(`${seconds(s.decision_p50_ms)} / ${seconds(s.decision_p95_ms)}`, "event → decision p50 / p95");
     kpi(`${freshness(s.freshness_p50_ms)} / ${freshness(s.freshness_p95_ms)}`, "freshness p50 / p95", "",
         FRESHNESS_TIP);
-    const lag = (ms) => (ms == null ? "—" : `${Math.round(ms)} ms`);
-    kpi(`${lag(s.context_lag_p50_ms)} / ${lag(s.context_lag_p95_ms)}`, "context materialization p50 / p95");
+    const lag = (ms, over) => (ms == null ? "—" : over ? `> ${Math.round(ms / 1000)} s` : `${Math.round(ms)} ms`);
+    kpi(`${lag(s.context_lag_p50_ms, s.context_lag_p50_over)} / ${lag(s.context_lag_p95_ms, s.context_lag_p95_over)}`,
+        "context materialization p50 / p95");
   }
 
   // ---- feed ----
@@ -432,11 +434,41 @@
     conn.className = `conn ${cls}`;
   }
 
-  const source = new EventSource("/events");
-  source.addEventListener("open", () => setConn("live", "live"));
-  source.addEventListener("error", () => setConn("reconnecting…", "down"));
-  source.addEventListener("snapshot", (e) => onSnapshot(JSON.parse(e.data)));
-  source.addEventListener("batch", (e) => onBatch(JSON.parse(e.data)));
+  // A payload that is not valid JSON cannot be applied, and the page would drift from the server if later
+  // batches were applied on top of it. The stream is closed and reopened, and the server answers with a snapshot.
+  let source = null;
+  let resyncTimer = null;
+
+  function resync() {
+    if (source) source.close();
+    source = null;
+    setConn("resyncing…", "down");
+    if (resyncTimer === null) resyncTimer = setTimeout(() => { resyncTimer = null; connect(); }, RESYNC_MS);
+  }
+
+  function handler(apply) {
+    return (e) => {
+      let data;
+      try {
+        data = JSON.parse(e.data);
+      } catch (err) {
+        console.error(`dropping an unparseable ${e.type} event`, err);
+        resync();
+        return;
+      }
+      apply(data);
+    };
+  }
+
+  function connect() {
+    source = new EventSource("/events");
+    source.addEventListener("open", () => setConn("live", "live"));
+    source.addEventListener("error", () => setConn("reconnecting…", "down"));
+    source.addEventListener("snapshot", handler(onSnapshot));
+    source.addEventListener("batch", handler(onBatch));
+  }
+
+  connect();
 
   resetGraph();
   renderEmpty();

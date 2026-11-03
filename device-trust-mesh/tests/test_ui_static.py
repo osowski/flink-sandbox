@@ -9,8 +9,13 @@ from dtm.ui.hub import Hub
 from dtm.ui.model import Board
 
 DOM_IDS = ("pane-devices", "pane-traffic", "pane-pairs", "summary", "devices-table", "traffic-graph",
-           "feed", "pairs-table")
+           "feed", "pairs-table", "pane-activity", "activity-cards")
 STATIC = ("index.html", "app.js", "style.css")
+EXEC_SUMMARY = ("Every customer device that touches a financial account (a phone, a tablet or a browser) is either "
+                "trusted or a risk. This use case shows how a bank can manage that trust in real time with a mesh of "
+                "cooperating AI agents built on Kafka, Flink and KubeRay. Each agent has one narrow job: enrolment, "
+                "risk scoring, step-up checks, revocation or compliance. Together they replace rigid, batch-driven "
+                "device policy with continuous, explainable decisions.")
 
 
 class _Collector(HTMLParser):
@@ -20,17 +25,29 @@ class _Collector(HTMLParser):
         self.maximize_buttons = 0
         self.scripts: list[str] = []
         self.stylesheets: list[str] = []
+        self.details: list[dict] = []
+        self._details_stack: list[dict] = []
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        if tag == "details":
+            entry = {"open": "open" in attrs, "ids": []}
+            self.details.append(entry)
+            self._details_stack.append(entry)
         if "id" in attrs:
             self.ids.append(attrs["id"])
+            for entry in self._details_stack:
+                entry["ids"].append(attrs["id"])
         if tag == "button" and "maximize" in (attrs.get("class") or "").split():
             self.maximize_buttons += 1
         if tag == "script" and attrs.get("src"):
             self.scripts.append(attrs["src"])
         if tag == "link" and attrs.get("rel") == "stylesheet":
             self.stylesheets.append(attrs["href"])
+
+    def handle_endtag(self, tag):
+        if tag == "details" and self._details_stack:
+            self._details_stack.pop()
 
 
 def _static_text(name: str) -> str:
@@ -52,7 +69,7 @@ class StaticFilesTest(unittest.TestCase):
         for dom_id in DOM_IDS:
             with self.subTest(id=dom_id):
                 self.assertEqual(page.ids.count(dom_id), 1)
-        self.assertEqual(page.maximize_buttons, 3)
+        self.assertEqual(page.maximize_buttons, 4)
         self.assertIn("/static/app.js", page.scripts)
         self.assertIn("/static/style.css", page.stylesheets)
 
@@ -77,6 +94,104 @@ class StaticFilesTest(unittest.TestCase):
         app_js = _static_text("app.js")
         self.assertIn("Kafka record timestamp → applied in context-mcp", app_js)
         self.assertIn("`~${", app_js)
+
+    def test_activity_pane_holds_bubbles_and_links_rows(self):
+        app_js = _static_text("app.js")
+        self.assertIn("BUBBLE_HOLD_MS = 4000", app_js)
+        self.assertIn('"activity"', app_js)
+        self.assertIn("data-device-id", app_js)
+        for name in ("Risk", "Enrolment", "Step-up", "Compliance", "Revocation"):
+            with self.subTest(name=name):
+                self.assertIn(f'"{name}"', app_js)
+
+    def test_same_bubble_updates_in_place(self):
+        app_js = _static_text("app.js")
+        self.assertIn("function updateShown(card, b)", app_js)
+        self.assertIn("fillBubble(node, b)", app_js)
+        self.assertIn("card.pending = b;", app_js)
+
+    def test_activity_pane_has_a_kafka_stale_banner(self):
+        html = _static_text("index.html")
+        pane = html[html.index('id="pane-activity"'):html.index('id="activity-cards"')]
+        self.assertIn('<div class="stale" hidden></div>', pane)
+        app_js = _static_text("app.js")
+        self.assertIn('kafka: ["pane-traffic", "pane-pairs", "pane-activity"]', app_js)
+        self.assertIn('"pane-activity": []', app_js)
+
+    def test_pairs_pane_sits_under_devices(self):
+        html = _static_text("index.html")
+        self.assertLess(html.index('"pane-devices"'), html.index('"pane-pairs"'))
+        self.assertLess(html.index('"pane-pairs"'), html.index('"pane-traffic"'))
+        self.assertLess(html.index('"pane-traffic"'), html.index('"pane-activity"'))
+
+    def test_message_viewer_dialog_and_fetch(self):
+        page = _Collector()
+        page.feed(_static_text("index.html"))
+        self.assertEqual(page.ids.count("message-viewer"), 1)
+        app_js = _static_text("app.js")
+        self.assertIn("/messages/${encodeURIComponent(", app_js)
+        self.assertIn("no longer held — the UI keeps the most recent", app_js)
+        self.assertIn("showModal()", app_js)
+
+    def test_viewer_header_never_shows_a_question_mark(self):
+        app_js = _static_text("app.js")
+        self.assertIn("openMessage(target.dataset.messageId, target.dataset.to)", app_js)
+        self.assertIn('const viewerName = (agent) => (agent ? agentLabel(agent) : "—");', app_js)
+
+    def test_feed_never_shows_a_question_mark_sender(self):
+        app_js = _static_text("app.js")
+        self.assertIn('NODE_LABELS[name] || name || "—"', app_js)
+        self.assertNotIn('|| "?"', app_js)
+
+    def test_late_task_rows_back_fill_the_feed_target(self):
+        app_js = _static_text("app.js")
+        self.assertIn('type === "message_target"', app_js)
+        self.assertIn("retarget(data)", app_js)
+
+    def test_audit_log_is_not_a_graph_node(self):
+        app_js = _static_text("app.js")
+        self.assertIn('const AUDIT_LOG = "audit log";', app_js)
+        self.assertIn("if (m.target !== AUDIT_LOG) drawNode(m.target);", app_js)
+
+    def test_viewer_leaves_out_empty_lists(self):
+        self.assertIn('v === "[]" || (Array.isArray(v) && v.length === 0)', _static_text("app.js"))
+
+    def test_dialogs_close_only_on_a_true_backdrop_click(self):
+        app_js = _static_text("app.js")
+        self.assertIn('dialog.addEventListener("mousedown"', app_js)
+        self.assertIn("closeOnBackdrop(viewer);", app_js)
+        self.assertIn("closeOnBackdrop(explainer);", app_js)
+        self.assertNotIn("if (e.target === viewer) viewer.close()", app_js)
+        self.assertNotIn("if (e.target === explainer) explainer.close()", app_js)
+
+    def test_escape_leaves_maximized_pane_while_a_dialog_is_open(self):
+        self.assertIn('document.querySelector("dialog[open]")', _static_text("app.js"))
+
+    def test_explainer_has_summary_and_both_diagrams(self):
+        html = _static_text("index.html")
+        self.assertIn("Agentic Device Trust Mesh: executive summary", html)
+        self.assertIn(EXEC_SUMMARY, " ".join(html.split()))
+        page = _Collector()
+        page.feed(html)
+        for dom_id in ("explain-open", "explainer", "diagram-agents", "diagram-architecture"):
+            with self.subTest(id=dom_id):
+                self.assertEqual(page.ids.count(dom_id), 1)
+        self.assertIn("The Complete Architecture", html)
+        for topic in ("agent.tasks.risk", "agent.tasks.enrolment", "agent.tasks.step-up", "agent.task-events"):
+            with self.subTest(topic=topic):
+                self.assertIn(topic, html)
+
+    def test_architecture_section_is_collapsed_by_default(self):
+        page = _Collector()
+        page.feed(_static_text("index.html"))
+        holders = [d for d in page.details if "diagram-architecture" in d["ids"]]
+        self.assertEqual(len(holders), 1)
+        self.assertFalse(holders[0]["open"])
+
+    def test_explainer_opens_only_from_its_button(self):
+        app_js = _static_text("app.js")
+        self.assertIn('$("#explain-open").addEventListener("click"', app_js)
+        self.assertNotIn("<dialog id=\"explainer\" open", _static_text("index.html"))
 
     def test_static_assets_served_with_types(self):
         client = TestClient(build_app(Hub(Board()), lambda: {}))

@@ -1,7 +1,11 @@
+import json
 import unittest
 from datetime import datetime, timezone
 
-from dtm.ui.model import Board, Coord, display_status, percentile
+from dtm.ui.model import REQUESTER_FACTOR, Board, Coord, display_status, json_safe, percentile
+
+ROUTER = "dtm-a2a-task-router"
+DECISIONS = "agent.decisions_human_readable"
 
 T0 = 1793448000000
 T0_DT = datetime.fromtimestamp(T0 / 1000, tz=timezone.utc)
@@ -12,8 +16,8 @@ def coord(offset=0, topic="agent.tasks_human_readable", partition=0, ts=0):
 
 
 def envelope(message_id="m-1", causation_id=None, device_id="dev-0001", event_time=T0_DT,
-             customer_id="cust-001", device_seq=1):
-    return {"message_id": message_id, "correlation_id": "corr-1", "causation_id": causation_id,
+             customer_id="cust-001", device_seq=1, correlation_id="corr-1"):
+    return {"message_id": message_id, "correlation_id": correlation_id, "causation_id": causation_id,
             "agent_id": "agent:risk", "agent_version": "1", "config_version": "c1",
             "event_time": event_time, "device_id": device_id, "customer_id": customer_id,
             "device_seq": device_seq, "required_context_seq": None, "mode": "LIVE",
@@ -21,15 +25,16 @@ def envelope(message_id="m-1", causation_id=None, device_id="dev-0001", event_ti
 
 
 def task(message_id="m-1", from_agent="dtm-a2a-task-router", to_agent="risk", device_id="dev-0001",
-         task_id=None, event_time=T0_DT):
-    return {"envelope": envelope(message_id, None, device_id, event_time), "from_agent": from_agent,
-            "to_agent": to_agent, "task_type": "ENROL", "task_id": task_id, "message_id": message_id,
+         task_id=None, event_time=T0_DT, task_type="ENROL", correlation_id="corr-1"):
+    return {"envelope": envelope(message_id, None, device_id, event_time, correlation_id=correlation_id),
+            "from_agent": from_agent, "to_agent": to_agent, "task_type": task_type, "task_id": task_id, "message_id": message_id,
             "reference_task_ids": None, "summary": "s"}
 
 
 def decision(message_id="m-2", causation_id="m-1", agent="risk", device_id="dev-0001", event_time=T0_DT,
-             outcome="GRANTED", policy_action="ALLOW", **over):
-    return {"envelope": envelope(message_id, causation_id, device_id, event_time), "agent": agent,
+             outcome="GRANTED", policy_action="ALLOW", correlation_id="corr-1", **over):
+    return {"envelope": envelope(message_id, causation_id, device_id, event_time,
+                                 correlation_id=correlation_id), "agent": agent,
             "task_id": "t-1", "artifact_name": "enrolment-decision", "outcome": outcome,
             "policy_action": policy_action, "risk_score": 10, "rationale": "looks fine",
             "signal_ids": None, "method": None, **over}
@@ -233,7 +238,7 @@ class FeedTest(unittest.TestCase):
         value["envelope"]["device_seq"] = None
         value["envelope"]["causation_id"] = None
         deltas = self.board.apply_decision(value, coord())
-        self.assertEqual(kinds(deltas), ["message"])
+        self.assertEqual(kinds(deltas), ["message", "activity"])
 
     def test_feed_is_bounded_newest_first(self):
         board = Board(clock=Clock(), feed_limit=3)
@@ -249,6 +254,357 @@ class FeedTest(unittest.TestCase):
         new = payload(board.apply_decision(decision(causation_id="m-9"), coord()), "message")
         self.assertIsNone(old["target"])
         self.assertEqual(new["target"], "a9")
+
+    def test_compliance_replies_target_the_audit_log_even_when_the_audited_decision_is_unknown(self):
+        decision_msg = payload(self.board.apply_decision(
+            decision("c-1", causation_id="never-seen", agent="compliance", artifact_name="audit-record"),
+            coord(0, DECISIONS)), "message")
+        status_msg = payload(self.board.apply_status(
+            status("c-2", causation_id="never-seen", agent="compliance"), coord(1)), "message")
+        self.assertEqual((decision_msg["source"], decision_msg["target"]), ("compliance", "audit log"))
+        self.assertEqual((status_msg["source"], status_msg["target"]), ("compliance", "audit log"))
+        self.assertEqual(self.board.message("c-1")["message"]["target"], "audit log")
+
+    def test_compliance_replies_are_not_held_for_a_later_task(self):
+        self.board.apply_decision(decision("c-1", causation_id="m-1", agent="compliance"), coord(0, DECISIONS))
+        deltas = self.board.apply_task(task("m-1", from_agent="risk"), coord(1))
+        self.assertNotIn("message_target", kinds(deltas))
+        self.assertEqual(self.board.message("c-1")["message"]["target"], "audit log")
+
+    def test_reply_before_its_task_gets_its_target_when_the_task_arrives(self):
+        reply = payload(self.board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"),
+                                                  coord(5, DECISIONS)), "message")
+        self.assertIsNone(reply["target"])
+        deltas = self.board.apply_task(task("m-1", from_agent="risk", to_agent="enrolment"), coord(6))
+        self.assertEqual(kinds(deltas), ["message", "activity", "message_target"])
+        self.assertEqual(payload(deltas, "message_target"),
+                         {"message_id": "d-1", "topic": DECISIONS, "partition": 0, "offset": 5, "target": "risk"})
+        self.assertEqual(self.board.message("d-1")["message"]["target"], "risk")
+        entry = next(m for m in self.board.snapshot()["feed"] if m["message_id"] == "d-1")
+        self.assertEqual(entry["target"], "risk")
+
+    def test_status_and_decision_waiting_on_one_task_are_both_filled(self):
+        self.board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"), coord(0, DECISIONS))
+        self.board.apply_status(status("s-1", causation_id="m-1", agent="enrolment"), coord(1))
+        deltas = self.board.apply_task(task("m-1", from_agent="risk"), coord(2))
+        self.assertEqual([p["message_id"] for k, p in deltas if k == "message_target"], ["d-1", "s-1"])
+
+    def test_a_repeated_task_fills_nothing_new(self):
+        self.board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"), coord(0, DECISIONS))
+        self.board.apply_task(task("m-1", from_agent="risk"), coord(1))
+        deltas = self.board.apply_task(task("m-1", from_agent="risk"), coord(2))
+        self.assertNotIn("message_target", kinds(deltas))
+
+    def test_a_reply_evicted_before_its_task_is_skipped(self):
+        board = Board(clock=Clock(), feed_limit=2)
+        board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"), coord(0, DECISIONS))
+        board.apply_task(task("m-2"), coord(1))
+        board.apply_task(task("m-3"), coord(2))
+        deltas = board.apply_task(task("m-1", from_agent="risk"), coord(3))
+        self.assertNotIn("message_target", kinds(deltas))
+
+    def test_a_task_without_a_sender_fills_nothing(self):
+        self.board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"), coord(0, DECISIONS))
+        deltas = self.board.apply_task(task("m-1", from_agent=None), coord(1))
+        self.assertNotIn("message_target", kinds(deltas))
+        self.assertIsNone(self.board.message("d-1")["message"]["target"])
+
+    def test_orphan_map_is_bounded(self):
+        board = Board(clock=Clock(), feed_limit=3)
+        for i in range(20):
+            board.apply_decision(decision(f"d-{i}", causation_id=f"m-{i}", agent="enrolment"),
+                                 coord(i, DECISIONS))
+        self.assertEqual(len(board._orphans), 3 * REQUESTER_FACTOR)
+        self.assertNotIn("m-0", board._orphans)
+        newest = board.apply_task(task("m-19", from_agent="risk"), coord(20))
+        self.assertEqual([p["message_id"] for k, p in newest if k == "message_target"], ["d-19"])
+
+def bubble_of(deltas):
+    """Return the activity bubble in ``deltas``, or None when the row set none."""
+    return next((p for k, p in deltas if k == "activity"), None)
+
+
+def hand_off(board, message_id, from_agent, to_agent, task_type, corr="C", offset=0):
+    return board.apply_task(task(message_id, from_agent=from_agent, to_agent=to_agent, task_type=task_type,
+                                 correlation_id=corr), coord(offset))
+
+
+def artifact(board, message_id, agent, artifact_name, corr="C", causation_id="m-1", **over):
+    value = decision(message_id, causation_id=causation_id, agent=agent, correlation_id=corr,
+                     artifact_name=artifact_name, **over)
+    return board.apply_decision(value, coord(0, DECISIONS))
+
+
+class ActivityTest(unittest.TestCase):
+    def setUp(self):
+        self.board = Board(clock=Clock())
+
+    def test_risk_hand_off_carries_the_held_score(self):
+        held = artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None,
+                        risk_score=72)
+        self.assertIsNone(bubble_of(held))
+        bubble = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT"))
+        self.assertEqual(bubble, {"agent": "risk", "to": "Enrolment", "customer_id": "cust-001",
+                                  "device_id": "dev-0001", "action": "decide enrolment · risk 72",
+                                  "color": "neutral", "message_id": "t-2", "time_ms": T0})
+
+    def test_risk_score_of_zero_is_shown(self):
+        artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None, risk_score=0)
+        bubble = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT"))
+        self.assertEqual(bubble["action"], "decide enrolment · risk 0")
+
+    def test_risk_hand_off_without_a_held_score(self):
+        bubble = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT"))
+        self.assertEqual((bubble["to"], bubble["action"], bubble["color"]),
+                         ("Enrolment", "decide enrolment", "neutral"))
+
+    def test_late_risk_score_enriches_the_hand_off_bubble(self):
+        bubble = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT"))
+        late = artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None,
+                        risk_score=72)
+        self.assertEqual(kinds(late), ["message", "activity"])
+        self.assertEqual(bubble_of(late), {**bubble, "action": "decide enrolment · risk 72"})
+        self.assertEqual(self.board.snapshot()["activity"]["risk"], bubble_of(late))
+
+    def test_redelivered_late_risk_score_adds_no_bubble(self):
+        hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT")
+        artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None, risk_score=72)
+        again = artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None,
+                         risk_score=72)
+        self.assertIsNone(bubble_of(again))
+
+    def test_late_risk_score_for_another_correlation_adds_no_bubble(self):
+        bubble = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT", corr="C"))
+        late = artifact(self.board, "d-1", "risk", "risk-assessment", corr="other", outcome=None,
+                        policy_action=None, risk_score=72)
+        self.assertIsNone(bubble_of(late))
+        self.assertEqual(self.board.snapshot()["activity"]["risk"], bubble)
+
+    def test_late_risk_score_after_the_bubble_moved_on_adds_no_bubble(self):
+        hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT", corr="C")
+        moved = bubble_of(artifact(self.board, "d-3", "risk", "enrolment-decision", corr="other", outcome="X",
+                                   policy_action=None))
+        late = artifact(self.board, "d-1", "risk", "risk-assessment", corr="C", outcome=None,
+                        policy_action=None, risk_score=72)
+        self.assertIsNone(bubble_of(late))
+        self.assertEqual(self.board.snapshot()["activity"]["risk"], moved)
+
+    def test_score_is_held_per_correlation(self):
+        artifact(self.board, "d-1", "risk", "risk-assessment", corr="C", outcome=None, policy_action=None,
+                 risk_score=72)
+        bubble = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT", corr="other"))
+        self.assertEqual(bubble["action"], "decide enrolment")
+
+    def test_redelivered_hand_off_gives_the_same_bubble(self):
+        artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None, risk_score=72)
+        first = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT"))
+        again = bubble_of(hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT", offset=1))
+        self.assertEqual(first, again)
+
+    def test_challenge_folds_into_the_step_up_hand_off(self):
+        held = artifact(self.board, "d-2", "enrolment", "enrolment-decision", outcome="CHALLENGED",
+                        policy_action="CHALLENGE")
+        self.assertIsNone(bubble_of(held))
+        bubble = bubble_of(hand_off(self.board, "t-3", "enrolment", "step-up", "STEP_UP"))
+        self.assertEqual((bubble["agent"], bubble["to"], bubble["action"], bubble["color"]),
+                         ("enrolment", "Step-up", "CHALLENGED → verify identity", "amber"))
+
+    def test_step_up_hand_off_from_enrolment_is_a_challenge_without_its_decision(self):
+        bubble = bubble_of(hand_off(self.board, "t-3", "enrolment", "step-up", "STEP_UP"))
+        self.assertEqual((bubble["to"], bubble["action"], bubble["color"]),
+                         ("Step-up", "CHALLENGED → verify identity", "amber"))
+
+    def test_challenge_after_its_hand_off_sets_no_bubble(self):
+        bubble = bubble_of(hand_off(self.board, "t-3", "enrolment", "step-up", "STEP_UP"))
+        self.assertEqual(bubble["action"], "CHALLENGED → verify identity")
+        late = artifact(self.board, "d-2", "enrolment", "enrolment-decision", outcome="CHALLENGED",
+                        policy_action="CHALLENGE")
+        self.assertIsNone(bubble_of(late))
+        self.assertEqual(self.board.snapshot()["activity"]["enrolment"], bubble)
+
+    def test_unknown_task_type_and_agent_fall_back_to_raw_names(self):
+        bubble = bubble_of(hand_off(self.board, "t-4", "mystery", "other", "DO_A_THING"))
+        self.assertEqual((bubble["agent"], bubble["to"], bubble["action"]), ("mystery", "other", "do a thing"))
+        self.assertEqual(bubble_of(hand_off(self.board, "t-5", "risk", None, "STEP_UP"))["to"], "—")
+
+    def test_revoke_purpose(self):
+        bubble = bubble_of(hand_off(self.board, "t-6", "enrolment", "revocation", "REVOKE"))
+        self.assertEqual((bubble["to"], bubble["action"]), ("Revocation", "revoke trust"))
+
+    def test_final_enrolment_decision_goes_to_the_device(self):
+        granted = bubble_of(artifact(self.board, "d-3", "enrolment", "enrolment-decision",
+                                     outcome="GRANTED", policy_action="ALLOW"))
+        self.assertEqual((granted["agent"], granted["to"], granted["action"], granted["color"]),
+                         ("enrolment", "device", "GRANTED → ALLOW", "green"))
+        denied = bubble_of(artifact(self.board, "d-4", "enrolment", "enrolment-decision",
+                                    outcome="DENIED", policy_action="BLOCK"))
+        self.assertEqual((denied["action"], denied["color"]), ("DENIED → BLOCK", "red"))
+        read_only = bubble_of(artifact(self.board, "d-5", "enrolment", "enrolment-decision",
+                                       outcome="LIMITED", policy_action="READ_ONLY"))
+        self.assertEqual(read_only["color"], "green")
+        challenge = bubble_of(artifact(self.board, "d-6", "enrolment", "enrolment-decision",
+                                       outcome="LATER", policy_action="CHALLENGE"))
+        self.assertEqual(challenge["color"], "amber")
+
+    def test_decision_without_a_policy_action_goes_to_the_requester(self):
+        self.board.apply_task(task("m-1", from_agent="risk", to_agent="enrolment"), coord())
+        bubble = bubble_of(artifact(self.board, "d-3", "enrolment", "enrolment-decision", outcome="X",
+                                    policy_action=None))
+        self.assertEqual((bubble["to"], bubble["action"], bubble["color"]), ("Risk", "X", "neutral"))
+
+    def test_decision_with_neither_outcome_nor_action_names_its_artifact(self):
+        bubble = bubble_of(artifact(self.board, "d-3", "enrolment", "enrolment-decision", outcome=None,
+                                    policy_action=None))
+        self.assertEqual(bubble["action"], "enrolment-decision")
+
+    def test_step_up_challenge_names_the_method(self):
+        bubble = bubble_of(artifact(self.board, "d-7", "step-up", "step-up-challenge", outcome=None,
+                                    policy_action=None, method="OTP"))
+        self.assertEqual((bubble["agent"], bubble["to"], bubble["action"], bubble["color"]),
+                         ("step-up", "device", "challenge → OTP", "amber"))
+        bare = bubble_of(artifact(self.board, "d-8", "step-up", "step-up-challenge", outcome=None,
+                                  policy_action=None, method=None))
+        self.assertEqual(bare["action"], "challenge")
+
+    def audit(self, message_id, subject_id, outcome=None):
+        return bubble_of(artifact(self.board, message_id, "compliance", "audit-record", causation_id=subject_id,
+                                  outcome=outcome, policy_action=None, risk_score=None))
+
+    def test_audit_record_goes_to_the_audit_log_with_its_subject_outcome(self):
+        artifact(self.board, "d-3", "enrolment", "enrolment-decision", outcome="GRANTED", policy_action="ALLOW")
+        bubble = self.audit("d-9", "d-3")
+        self.assertEqual((bubble["agent"], bubble["to"], bubble["action"], bubble["color"]),
+                         ("compliance", "audit log", "audited GRANTED", "neutral"))
+
+    def test_audit_of_a_step_up_challenge_names_its_method(self):
+        artifact(self.board, "d-7", "step-up", "step-up-challenge", outcome=None, policy_action=None,
+                 method="OTP")
+        self.assertEqual(self.audit("d-9", "d-7")["action"], "audited OTP")
+
+    def test_audit_of_an_unheld_or_bare_subject_is_plain(self):
+        self.assertEqual(self.audit("d-9", "never-seen")["action"], "audited")
+        artifact(self.board, "d-1", "risk", "risk-assessment", outcome=None, policy_action=None, risk_score=7)
+        self.assertEqual(self.audit("d-10", "d-1")["action"], "audited")
+
+    def test_audit_with_its_own_outcome_prefers_it(self):
+        artifact(self.board, "d-3", "enrolment", "enrolment-decision", outcome="GRANTED", policy_action="ALLOW")
+        self.assertEqual(self.audit("d-9", "d-3", outcome="DENIED")["action"], "audited DENIED")
+
+    def test_audit_of_a_challenge_is_not_held_as_a_challenge(self):
+        bubble = self.audit("d-9", "never-seen", outcome="CHALLENGED")
+        self.assertEqual(bubble["action"], "audited CHALLENGED")
+        later = bubble_of(hand_off(self.board, "t-3", "enrolment", "revocation", "REVOKE"))
+        self.assertEqual(later["action"], "revoke trust")
+
+    def test_reply_with_unseen_requester_still_bubbles(self):
+        bubble = bubble_of(artifact(self.board, "d-3", "enrolment", "enrolment-decision",
+                                    causation_id="never-seen", outcome="X", policy_action=None))
+        self.assertEqual((bubble["to"], bubble["action"]), ("—", "X"))
+
+    def test_router_and_status_rows_set_no_bubble(self):
+        self.assertIsNone(bubble_of(hand_off(self.board, "t-1", ROUTER, "risk", "ASSESS_ENROLMENT")))
+        self.assertIsNone(bubble_of(self.board.apply_status(status(), coord())))
+        self.assertEqual(self.board.snapshot()["activity"], {})
+
+    def test_customer_from_envelope_then_device_table(self):
+        own = task("t-1", from_agent="risk", to_agent="enrolment", device_id="dev-7")
+        own["envelope"]["customer_id"] = "cust-env"
+        self.assertEqual(bubble_of(self.board.apply_task(own, coord()))["customer_id"], "cust-env")
+        self.board.apply_devices([device("dev-8", customer_id="cust-table")], T0)
+        bare = task("t-2", from_agent="risk", to_agent="enrolment", device_id="dev-8")
+        bare["envelope"]["customer_id"] = None
+        self.assertEqual(bubble_of(self.board.apply_task(bare, coord()))["customer_id"], "cust-table")
+        unknown = task("t-3", from_agent="risk", to_agent="enrolment", device_id="dev-9")
+        unknown["envelope"]["customer_id"] = None
+        self.assertIsNone(bubble_of(self.board.apply_task(unknown, coord()))["customer_id"])
+
+    def test_activity_delta_follows_the_message_delta(self):
+        deltas = hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT")
+        self.assertEqual(kinds(deltas), ["message", "activity"])
+
+    def test_snapshot_holds_latest_bubble_per_agent_and_is_strict_json(self):
+        hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT")
+        second = bubble_of(hand_off(self.board, "t-3", "risk", "enrolment", "DECIDE_ENROLMENT", offset=1))
+        bubble_of(artifact(self.board, "d-9", "compliance", "audit-record", outcome="GRANTED"))
+        activity = self.board.snapshot()["activity"]
+        self.assertEqual(sorted(activity), ["compliance", "risk"])
+        self.assertEqual(activity["risk"], second)
+        json.dumps(self.board.snapshot(), allow_nan=False)
+
+    def test_snapshot_bubbles_are_copies(self):
+        hand_off(self.board, "t-2", "risk", "enrolment", "DECIDE_ENROLMENT")
+        self.board.snapshot()["activity"]["risk"]["action"] = "mutated"
+        self.assertEqual(self.board.snapshot()["activity"]["risk"]["action"], "decide enrolment")
+
+    def test_held_correlations_are_bounded(self):
+        board = Board(clock=Clock(), feed_limit=1)
+        for i in range(10):
+            artifact(board, f"d-{i}", "risk", "risk-assessment", corr=f"C{i}", outcome=None,
+                     policy_action=None, risk_score=i)
+        old = bubble_of(hand_off(board, "t-a", "risk", "enrolment", "DECIDE_ENROLMENT", corr="C0"))
+        new = bubble_of(hand_off(board, "t-b", "risk", "enrolment", "DECIDE_ENROLMENT", corr="C9"))
+        self.assertEqual(old["action"], "decide enrolment")
+        self.assertEqual(new["action"], "decide enrolment · risk 9")
+
+
+class MessageStoreTest(unittest.TestCase):
+    def test_message_returns_feed_entry_and_row(self):
+        board = Board()
+        value = task("m1", device_id="dev-1")
+        board.apply_task(value, coord())
+        held = board.message("m1")
+        self.assertEqual(held["message"]["message_id"], "m1")
+        self.assertEqual(held["row"]["summary"], value["summary"])
+        self.assertEqual(held["row"]["envelope"]["event_time"], T0)
+        self.assertIsInstance(held["row"]["envelope"]["event_time"], int)
+        json.dumps(held, allow_nan=False)
+
+    def test_message_store_evicts_oldest_beyond_feed_limit(self):
+        board = Board(feed_limit=2)
+        for i in range(3):
+            board.apply_task(task(f"m{i}"), coord(i))
+        self.assertIsNone(board.message("m0"))
+        self.assertIsNotNone(board.message("m1"))
+        self.assertIsNotNone(board.message("m2"))
+
+    def test_feed_limit_is_exposed(self):
+        self.assertEqual(Board(feed_limit=7).feed_limit, 7)
+
+    def test_message_unknown_is_none(self):
+        self.assertIsNone(Board().message("nope"))
+
+    def test_decisions_and_statuses_are_held_even_when_requester_unseen(self):
+        board = Board()
+        board.apply_decision(decision("d1", causation_id="never-seen"), coord(0, "agent.decisions_human_readable"))
+        board.apply_status(status("s1", causation_id="never-seen"), coord(1, "agent.task-status_human_readable"))
+        self.assertIsNone(board.message("d1")["message"]["target"])
+        self.assertEqual(board.message("d1")["row"]["outcome"], "GRANTED")
+        self.assertEqual(board.message("s1")["row"]["state"], "TASK_STATE_COMPLETED")
+        self.assertEqual(board.message("s1")["message"]["kind"], "status")
+
+    def test_row_is_a_copy_of_the_applied_value(self):
+        board = Board()
+        value = task("m1")
+        board.apply_task(value, coord())
+        value["summary"] = "mutated"
+        board.message("m1")["row"]["summary"] = "also mutated"
+        self.assertEqual(board.message("m1")["row"]["summary"], "s")
+
+    def test_redelivered_message_id_keeps_one_row(self):
+        board = Board(feed_limit=2)
+        board.apply_task(task("m1"), coord(0))
+        board.apply_task(task("m2"), coord(1))
+        board.apply_task(task("m1"), coord(2))
+        board.apply_task(task("m3"), coord(3))
+        self.assertIsNone(board.message("m2"))
+        self.assertEqual(board.message("m1")["message"]["offset"], 2)
+
+
+class JsonSafeTest(unittest.TestCase):
+    def test_converts_datetimes_and_recurses(self):
+        out = json_safe({"a": T0_DT, "b": [T0_DT, (1, None)], "c": {"d": "x", "e": 1.5, "f": True}})
+        self.assertEqual(out, {"a": T0, "b": [T0, [1, None]], "c": {"d": "x", "e": 1.5, "f": True}})
+        json.dumps(out, allow_nan=False)
 
 
 class PairsTest(unittest.TestCase):

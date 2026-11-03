@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from dtm.ui.fake import FakeFeed
@@ -28,6 +29,35 @@ def run(seconds: float, **kwargs):
     return board, deltas
 
 
+def capture(seconds: float, arrivals: list | None = None):
+    """Play the feed and return the raw task and decision values the board was handed.
+
+    ``arrivals``, when given, collects ``(kind, value)`` for both in the order the board saw them.
+    """
+    clock = Clock()
+    board = Board(clock=clock)
+    tasks, decisions = [], []
+    arrivals = [] if arrivals is None else arrivals
+    apply_task, apply_decision = board.apply_task, board.apply_decision
+
+    def record_task(value, coord):
+        tasks.append(value)
+        arrivals.append(("task", value))
+        return apply_task(value, coord)
+
+    def record_decision(value, coord):
+        decisions.append(value)
+        arrivals.append(("decision", value))
+        return apply_decision(value, coord)
+
+    board.apply_task, board.apply_decision = record_task, record_decision
+    feed = FakeFeed(board, lambda deltas: None, clock=clock)
+    for i in range(round(seconds / TICK_S) + 1):
+        clock.now_s = T0_S + i * TICK_S
+        feed.step(clock.now_s)
+    return tasks, decisions
+
+
 class FakeFeedTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -53,11 +83,34 @@ class FakeFeedTest(unittest.TestCase):
         messages = self.of("message")
         edges = {(m["source"], m["target"]) for m in messages if m["kind"] == "task"}
         self.assertEqual(edges, {(ROUTER, "risk"), ("risk", "enrolment"), (ROUTER, "enrolment"),
-                                 ("enrolment", "step-up"), ("enrolment", "compliance")})
+                                 ("enrolment", "step-up")})
         self.assertEqual({m["kind"] for m in messages}, {"task", "decision", "status"})
         for m in messages:
+            if m["source"] == "compliance":
+                self.assertEqual(m["target"], "audit log")
+
+    def test_no_feed_entry_is_left_without_a_target(self):
+        for m in self.snapshot["feed"]:
             with self.subTest(message=m["message_id"]):
                 self.assertIsNotNone(m["target"])
+
+    def test_some_replies_arrive_before_their_task_and_are_back_filled(self):
+        filled = self.of("message_target")
+        self.assertTrue(filled)
+        sent = {m["message_id"]: m for m in self.of("message")}
+        for f in filled:
+            with self.subTest(message=f["message_id"]):
+                reply = sent[f["message_id"]]
+                self.assertIsNone(reply["target"])
+                self.assertEqual(reply["source"], "enrolment")
+                self.assertEqual(f["target"], "risk")
+                self.assertEqual((f["topic"], f["partition"], f["offset"]),
+                                 (reply["topic"], reply["partition"], reply["offset"]))
+
+    def test_compliance_replies_name_the_audit_log(self):
+        replies = [m for m in self.of("message") if m["source"] == "compliance"]
+        self.assertTrue(replies)
+        self.assertEqual({m["target"] for m in replies}, {"audit log"})
 
     def test_first_leg_runs_through_risk_and_the_router_only_resumes_challenges(self):
         tasks = [m for m in self.of("message") if m["kind"] == "task"]
@@ -71,9 +124,88 @@ class FakeFeedTest(unittest.TestCase):
         self.assertTrue(any((m["source"], m["target"]) == (ROUTER, "enrolment") for m in tasks))
 
     def test_enrolment_decisions_answer_risk_on_the_first_leg_and_the_router_on_the_second(self):
-        targets = {m["target"] for m in self.of("message")
+        targets = {m["target"] for m in self.snapshot["feed"]
                    if m["kind"] == "decision" and m["source"] == "enrolment"}
         self.assertEqual(targets, {"risk", ROUTER})
+
+    def test_task_types_match_the_real_mesh(self):
+        tasks, _ = capture(30)
+        sent = {(v["from_agent"], v["to_agent"], v["task_type"]) for v in tasks}
+        self.assertIn((ROUTER, "risk", "ASSESS_ENROLMENT"), sent)
+        self.assertIn(("risk", "enrolment", "DECIDE_ENROLMENT"), sent)
+        self.assertIn(("enrolment", "step-up", "STEP_UP"), sent)
+        self.assertIn((ROUTER, "enrolment", "RESOLVE_CHALLENGE"), sent)
+        self.assertFalse(any(to == "compliance" for _, to, _ in sent))
+
+    def test_compliance_audits_every_artifact(self):
+        _, decisions = capture(30)
+        audits = [d for d in decisions if d["artifact_name"] == "audit-record"]
+        audited = [d for d in decisions if d["artifact_name"] != "audit-record"]
+        self.assertEqual({d["artifact_name"] for d in audited},
+                         {"risk-assessment", "enrolment-decision", "step-up-challenge"})
+        for d in audited:
+            with self.subTest(artifact=d["artifact_name"], message=d["envelope"]["message_id"]):
+                replies = [a for a in audits if a["envelope"]["causation_id"] == d["envelope"]["message_id"]]
+                self.assertEqual(len(replies), 1)
+                self.assertEqual(replies[0]["agent"], "compliance")
+                self.assertIsNone(replies[0]["outcome"])
+        self.assertEqual(len(audits), len(audited))
+
+    def test_compliance_bubbles_name_the_audited_outcome(self):
+        actions = {b["action"] for b in self.of("activity") if b["agent"] == "compliance"}
+        self.assertLessEqual({"audited GRANTED", "audited OTP", "audited"}, actions)
+
+    def test_some_risk_assessments_arrive_after_their_hand_off(self):
+        arrivals = []
+        capture(30, arrivals)
+        hand_offs, late = set(), 0
+        for kind, v in arrivals:
+            corr = v["envelope"]["correlation_id"]
+            if kind == "task" and v["task_type"] == "DECIDE_ENROLMENT":
+                hand_offs.add(corr)
+            elif kind == "decision" and v["artifact_name"] == "risk-assessment":
+                late += corr in hand_offs
+        self.assertGreaterEqual(late, 1)
+        self.assertLess(late, len(hand_offs))
+
+    def test_late_risk_score_enriches_the_risk_bubble_in_place(self):
+        actions: dict[str, list[str]] = {}
+        for b in self.of("activity"):
+            if b["agent"] == "risk":
+                actions.setdefault(b["message_id"], []).append(b["action"])
+        enriched = [a for a in actions.values() if len(a) > 1]
+        self.assertTrue(enriched)
+        for a in enriched:
+            with self.subTest(actions=a):
+                self.assertEqual(a[0], "decide enrolment")
+                self.assertRegex(a[1], r"^decide enrolment · risk \d+$")
+
+    def test_risk_assessment_signal_ids_are_empty_when_clean(self):
+        _, decisions = capture(30)
+        by_rationale = {}
+        for d in decisions:
+            if d["artifact_name"] == "risk-assessment":
+                by_rationale[d["rationale"]] = d["signal_ids"]
+        self.assertEqual(json.loads(by_rationale["CLEAN signals"]), [])
+        self.assertEqual(json.loads(by_rationale["OUTDATED_OS signals"]), ["OUTDATED_OS"])
+
+    def test_step_up_challenge_carries_a_method(self):
+        _, decisions = capture(30)
+        challenges = [d for d in decisions if d["artifact_name"] == "step-up-challenge"]
+        self.assertTrue(challenges)
+        for d in challenges:
+            self.assertEqual(d["method"], "OTP")
+            self.assertIsNone(d["outcome"])
+            self.assertIsNone(d["policy_action"])
+
+    def test_task_summaries_are_sentences(self):
+        tasks, _ = capture(30)
+        self.assertTrue(tasks)
+        for v in tasks:
+            with self.subTest(summary=v["summary"]):
+                self.assertIn(v["envelope"]["device_id"], v["summary"])
+                self.assertIn(" ", v["summary"])
+                self.assertNotEqual(v["summary"], f"{v['task_type']} {v['envelope']['device_id']}")
 
     def test_record_positions_are_unique(self):
         positions = [(m["topic"], m["partition"], m["offset"]) for m in self.of("message")]
@@ -94,6 +226,17 @@ class FakeFeedTest(unittest.TestCase):
         self.assertIsNotNone(summary["decision_p50_ms"])
         self.assertIsNotNone(summary["freshness_p50_ms"])
         self.assertIsNotNone(summary["context_lag_p50_ms"])
+
+    def test_every_working_agent_ends_with_a_bubble(self):
+        activity = self.snapshot["activity"]
+        self.assertLessEqual({"risk", "enrolment", "step-up", "compliance"}, set(activity))
+        for agent, bubble in activity.items():
+            with self.subTest(agent=agent):
+                self.assertNotIn(None, (bubble["to"], bubble["action"]))
+                self.assertNotEqual(agent, ROUTER)
+        json.dumps(self.snapshot, allow_nan=False)
+        for bubble in self.of("activity"):
+            json.dumps(bubble, allow_nan=False)
 
     def test_same_time_twice_adds_nothing(self):
         clock = Clock()

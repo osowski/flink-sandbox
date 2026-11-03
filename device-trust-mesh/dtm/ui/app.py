@@ -1,4 +1,4 @@
-"""The HTTP surface: the page and its assets, the SSE stream, and a liveness probe."""
+"""The HTTP surface: the page and its assets, the SSE stream, held message rows and a liveness probe."""
 import asyncio
 import mimetypes
 from contextlib import asynccontextmanager
@@ -32,7 +32,8 @@ def _file_response(name: str) -> Response:
     return Response(entry.read_bytes(), media_type=media_type)
 
 
-def build_app(hub: Hub, health: Callable[[], dict]) -> Starlette:
+def build_app(hub: Hub, health: Callable[[], dict],
+              message: Callable[[str], dict | None] = lambda _id: None, message_limit: int = 500) -> Starlette:
     async def index(request: Request) -> Response:
         return _file_response(_INDEX)
 
@@ -45,11 +46,18 @@ def build_app(hub: Hub, health: Callable[[], dict]) -> Starlette:
     async def healthz(request: Request) -> Response:
         return JSONResponse(health())
 
+    async def message_row(request: Request) -> Response:
+        held = message(request.path_params["message_id"])
+        if held is None:
+            return JSONResponse({"error": "not held", "limit": message_limit}, status_code=404)
+        return JSONResponse(held)
+
     @asynccontextmanager
     async def lifespan(app: Starlette):
         hub.bind(asyncio.get_running_loop())
         yield
 
     return Starlette(routes=[Route("/", index), Route("/static/{name}", static),
-                             Route("/events", events), Route("/healthz", healthz)],
+                             Route("/events", events), Route("/healthz", healthz),
+                             Route("/messages/{message_id}", message_row)],
                      lifespan=lifespan)

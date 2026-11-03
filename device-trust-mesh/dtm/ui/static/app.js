@@ -9,7 +9,9 @@
   const RESYNC_MS = 1000;
   const FEED_LIMIT = 500;
   const MAX_DOTS = 300;
+  const BUBBLE_HOLD_MS = 4000;
   const ROUTER = "dtm-a2a-task-router";
+  const AUDIT_LOG = "audit log";
   const FRESHNESS_TIP = "measured at a 500 ms poll interval";
   const MATERIALIZATION_TIP = "Kafka record timestamp → applied in context-mcp; "
     + "mostly the wait for Flink's next checkpoint commit";
@@ -19,8 +21,10 @@
     [ROUTER, [80, 120]], ["risk", [235, 62]], ["enrolment", [395, 120]],
     ["compliance", [560, 45]], ["step-up", [560, 120]], ["revocation", [560, 195]],
   ]);
+  const AGENT_CARDS = [["risk", "Risk"], ["enrolment", "Enrolment"], ["step-up", "Step-up"],
+    ["compliance", "Compliance"], ["revocation", "Revocation"]];
   const NODE_LABELS = { [ROUTER]: "router" };
-  const STALE_PANES = { kafka: ["pane-traffic", "pane-pairs"], context: ["pane-devices"] };
+  const STALE_PANES = { kafka: ["pane-traffic", "pane-pairs", "pane-activity"], context: ["pane-devices"] };
   const COLORS = [["red", "blocked"], ["amber", "step-up"], ["green", "trusted"], ["grey", "pending"]];
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -33,9 +37,13 @@
   const feedBody = $("#feed tbody");
   const pairsBody = $("#pairs-table tbody");
   const trafficPane = $("#pane-traffic");
+  const activityCards = $("#activity-cards");
 
   let state = freshState();
   const deviceRows = new Map();
+  // One entry per agent card: {agent, el, slot, tag, shown, shownAt, pending, timer}.
+  const cards = new Map();
+  let linked = null;
   const edgeEls = new Map();
   const nodeEls = new Map();
   let schedule = [];
@@ -63,7 +71,7 @@
     return ms >= 1000 ? `~${(ms / 1000).toFixed(1)} s` : `~${Math.round(ms)} ms`;
   };
   const freshness = (ms) => (ms == null ? "—" : `≤ ${Math.round(ms)} ms`);
-  const agentLabel = (name) => NODE_LABELS[name] || name || "?";
+  const agentLabel = (name) => NODE_LABELS[name] || name || "—";
   const edgeKey = (source, target) => `${source}→${target}`;
   const messageKey = (m) => `${m.topic}|${m.partition}|${m.offset}`;
 
@@ -103,14 +111,15 @@
     ordered.forEach((row, i) => {
       let tr = deviceRows.get(row.device_id);
       if (!tr) {
-        tr = el("tr");
+        tr = el("tr", { "data-device-id": row.device_id });
         tr.addEventListener("animationend", () => tr.classList.remove("flash"));
         for (const cls of ["", "", "", "reason", "", "num", "num fresh"]) tr.append(el("td", cls ? { class: cls } : {}));
         tr.cells[6].title = FRESHNESS_TIP;
         tr.cells[2].append(el("span", { class: "pill" }));
         deviceRows.set(row.device_id, tr);
       }
-      tr.className = `c-${row.color}${tr.classList.contains("flash") ? " flash" : ""}`;
+      const kept = ["flash", "linked"].filter((cls) => tr.classList.contains(cls));
+      tr.className = [`c-${row.color}`, ...kept].join(" ");
       tr.cells[0].textContent = row.device_id;
       tr.cells[1].textContent = row.customer_id || "—";
       const pill = tr.cells[2].firstChild;
@@ -159,7 +168,7 @@
       if (row) row.remove();
     }
     drawNode(m.source);
-    drawNode(m.target);
+    if (m.target !== AUDIT_LOG) drawNode(m.target);
     if (m.kind === "task" && m.source && m.target) addEdge(m.source, m.target);
     return true;
   }
@@ -177,6 +186,17 @@
               el("td", {}, m.device_id),
               el("td", { class: "pos" }, `${m.topic} @ ${m.partition}:${m.offset}`));
     return tr;
+  }
+
+  // A reply can reach the page before the task that names its sender; the target follows once the task lands.
+  function retarget(update) {
+    const key = messageKey(update);
+    const m = state.feed.find((entry) => messageKey(entry) === key);
+    if (!m) return false;
+    m.target = update.target;
+    const row = feedBody.querySelector(`tr[data-key="${CSS.escape(key)}"]`);
+    if (row) row.children[1].textContent = `${agentLabel(m.source)} → ${agentLabel(m.target)}`;
+    return true;
   }
 
   function renderFeed() {
@@ -346,9 +366,145 @@
     }));
   }
 
+  // ---- agent activity ----
+  const agentName = (agent) => (AGENT_CARDS.find(([key]) => key === agent) || [agent, agent])[1];
+
+  function cardFor(agent) {
+    let card = cards.get(agent);
+    if (card) return card;
+    const root = el("div", { class: "card", "data-agent": agent });
+    const slot = el("div", { class: "bubble-slot" });
+    const tag = el("span", { class: "tag" }, "disabled");
+    const label = el("div", { class: "card-label" }, `${agentName(agent)} Agent`);
+    label.append(tag);
+    root.append(slot, label);
+    card = { agent, el: root, slot, tag, shown: null, shownAt: 0, pending: null, timer: null };
+    cards.set(agent, card);
+    activityCards.append(root);
+    paintCard(card);
+    return card;
+  }
+
+  function linkRow(bubble, deviceId) {
+    unlinkRow();
+    const row = devicesBody.querySelector(`tr[data-device-id="${CSS.escape(deviceId)}"]`);
+    if (!row) return;
+    row.classList.add("linked");
+    row.scrollIntoView({ block: "nearest" });
+    linked = { row, bubble };
+  }
+
+  function unlinkRow() {
+    if (linked) linked.row.classList.remove("linked");
+    linked = null;
+  }
+
+  function fillBubble(node, b) {
+    const line = (label, value) => {
+      const div = el("div", { class: "line" });
+      div.append(el("b", {}, label), value);
+      return div;
+    };
+    node.className = `bubble b-${b.color}`;
+    node.dataset.messageId = b.message_id;
+    node.dataset.to = b.to;
+    node.replaceChildren(line("To:", b.to), line("Customer:", b.customer_id || "—"), line("Device:", b.device_id),
+                         line("Action:", b.action));
+  }
+
+  function bubbleEl(b) {
+    const node = el("div");
+    fillBubble(node, b);
+    node.addEventListener("mouseenter", () => linkRow(node, b.device_id));
+    node.addEventListener("mouseleave", unlinkRow);
+    return node;
+  }
+
+  function paintCard(card) {
+    if (linked && card.slot.contains(linked.bubble)) unlinkRow();
+    const b = card.shown;
+    const disabled = !b && card.agent === "revocation";
+    card.el.classList.toggle("disabled", disabled);
+    card.tag.hidden = !disabled;
+    card.slot.replaceChildren(b ? bubbleEl(b) : el("div", { class: "waiting" }, "waiting for activity"));
+  }
+
+  function showBubble(card, b) {
+    card.shown = b;
+    card.shownAt = performance.now();
+    paintCard(card);
+  }
+
+  const sameBubble = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  // The shown bubble enriched: its content changes in place, keeping its hold and skipping the pop-in.
+  function updateShown(card, b) {
+    if (sameBubble(card.shown, b)) return;
+    card.shown = b;
+    const node = card.slot.querySelector(".bubble");
+    if (node) fillBubble(node, b);
+    else paintCard(card);
+  }
+
+  // A bubble stays up for at least BUBBLE_HOLD_MS; a newer one arriving sooner waits as the card's single
+  // pending bubble, replacing any earlier pending one, and shows when the hold elapses. A bubble with the
+  // message id of the shown or pending one is that bubble enriched and takes its place.
+  function offerBubble(b) {
+    const card = cardFor(b.agent);
+    if (card.shown && card.shown.message_id === b.message_id) {
+      updateShown(card, b);
+      return;
+    }
+    if (card.pending && card.pending.message_id === b.message_id) {
+      card.pending = b;
+      return;
+    }
+    const remaining = card.shown ? BUBBLE_HOLD_MS - (performance.now() - card.shownAt) : 0;
+    if (remaining <= 0) {
+      clearTimeout(card.timer);
+      card.timer = null;
+      card.pending = null;
+      showBubble(card, b);
+      return;
+    }
+    card.pending = b;
+    if (card.timer === null) {
+      card.timer = setTimeout(() => {
+        card.timer = null;
+        const next = card.pending;
+        card.pending = null;
+        if (next) showBubble(card, next);
+      }, remaining);
+    }
+  }
+
+  function renderActivity(activity) {
+    for (const [agent, card] of cards) {
+      clearTimeout(card.timer);
+      card.timer = null;
+      card.pending = null;
+      if (!(agent in activity) && !AGENT_CARDS.some(([key]) => key === agent)) {
+        card.el.remove();
+        cards.delete(agent);
+      }
+    }
+    for (const [agent] of AGENT_CARDS) cardFor(agent);
+    for (const agent of Object.keys(activity)) cardFor(agent);
+    for (const [agent, card] of cards) {
+      const b = activity[agent] || null;
+      if (b && card.shown && card.shown.message_id === b.message_id) {
+        updateShown(card, b);
+        continue;
+      }
+      card.shown = b;
+      card.shownAt = performance.now();
+      paintCard(card);
+    }
+  }
+
   // ---- stale banners ----
   function renderStale() {
-    const since = { "pane-devices": [], "pane-traffic": [], "pane-pairs": [] };
+    const since = { "pane-devices": [], "pane-traffic": [], "pane-pairs": [], "pane-activity": [] };
     for (const [source, panes] of Object.entries(STALE_PANES)) {
       const at = state.stale[source];
       if (at != null) for (const pane of panes) since[pane].push(at);
@@ -378,8 +534,103 @@
     $(".maximize", pane).addEventListener("click", () =>
       setMaximized(pane.classList.contains("maximized") ? null : pane));
   }
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") setMaximized(null); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || document.querySelector("dialog[open]")) return;
+    setMaximized(null);
+  });
   $(".clear-filter", trafficPane).addEventListener("click", () => setFilter(null));
+
+  // ---- message viewer ----
+  const viewer = $("#message-viewer");
+  const viewerBody = $(".viewer-body", viewer);
+  const READABLE_FIELDS = {
+    task: ["task_type", "summary"],
+    decision: ["outcome", "policy_action", "risk_score", "rationale", "signal_ids", "method"],
+    status: ["state", "status_text"],
+  };
+  let viewerRequest = 0;
+
+  const isEmpty = (v) => v == null || v === "" || v === "[]" || (Array.isArray(v) && v.length === 0);
+  const fieldText = (v) => (typeof v === "object" ? JSON.stringify(v) : String(v));
+  const viewerName = (agent) => (agent ? agentLabel(agent) : "—");
+
+  function viewerNote(text) {
+    viewerBody.replaceChildren(el("p", { class: "viewer-note" }, text));
+  }
+
+  function copyJson(text, button) {
+    const done = () => { button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy JSON"; }, 1500); };
+    try {
+      navigator.clipboard.writeText(text).then(done, () => {});
+    } catch (err) {
+      // no clipboard access: the JSON stays selectable in the block
+    }
+  }
+
+  // `to` is the recipient of the bubble the viewer was opened from; a feed row has none and shows its target.
+  function renderMessage(message, row, to) {
+    const kind = message.kind;
+    const customer = (row.envelope && row.envelope.customer_id) || "—";
+    const head = el("h3", {}, `${viewerName(message.source)} → ${to || viewerName(message.target)}`);
+    const meta = el("p", { class: "viewer-meta" },
+      [kind, message.device_id, customer, hms(message.time_ms),
+       `${message.topic} @ ${message.partition}:${message.offset}`].join(" · "));
+    const list = el("dl", { class: "viewer-fields" });
+    for (const name of READABLE_FIELDS[kind] || []) {
+      if (isEmpty(row[name])) continue;
+      list.append(el("dt", {}, name), el("dd", {}, fieldText(row[name])));
+    }
+    const json = JSON.stringify(row, null, 2);
+    const copy = el("button", { type: "button", class: "viewer-copy" }, "Copy JSON");
+    copy.addEventListener("click", () => copyJson(json, copy));
+    viewerBody.replaceChildren(head, meta, list, copy, el("pre", { class: "viewer-json" }, json));
+  }
+
+  async function openMessage(messageId, to) {
+    const request = ++viewerRequest;
+    viewerNote("loading…");
+    if (!viewer.open) viewer.showModal();
+    try {
+      const response = await fetch(`/messages/${encodeURIComponent(messageId)}`);
+      const body = await response.json();
+      if (request !== viewerRequest) return;
+      if (response.status === 404) {
+        viewerNote(`no longer held — the UI keeps the most recent ${body.limit} messages`);
+      } else if (response.ok) {
+        renderMessage(body.message, body.row, to);
+      } else {
+        viewerNote("could not load the message");
+      }
+    } catch (err) {
+      if (request === viewerRequest) viewerNote("could not load the message");
+    }
+  }
+
+  function openFrom(e, selector) {
+    const target = e.target.closest(selector);
+    if (target && target.dataset.messageId) openMessage(target.dataset.messageId, target.dataset.to);
+  }
+
+  // A drag that starts inside the dialog and ends on its backdrop is not a backdrop click.
+  function closeOnBackdrop(dialog) {
+    let downOnBackdrop = false;
+    dialog.addEventListener("mousedown", (e) => { downOnBackdrop = e.target === dialog; });
+    dialog.addEventListener("click", (e) => {
+      if (downOnBackdrop && e.target === dialog) dialog.close();
+      downOnBackdrop = false;
+    });
+  }
+
+  activityCards.addEventListener("click", (e) => openFrom(e, ".bubble"));
+  feedBody.addEventListener("click", (e) => openFrom(e, "tr.feed-row"));
+  $(".viewer-close", viewer).addEventListener("click", () => viewer.close());
+  closeOnBackdrop(viewer);
+
+  // ---- explainer ----
+  const explainer = $("#explainer");
+  $("#explain-open").addEventListener("click", () => explainer.showModal());
+  $(".viewer-close", explainer).addEventListener("click", () => explainer.close());
+  closeOnBackdrop(explainer);
 
   // ---- stream ----
   function onSnapshot(snap) {
@@ -392,6 +643,7 @@
     state.pairs = snap.pairs;
     state.summary = snap.summary;
     state.stale = { ...state.stale, ...snap.stale };
+    renderActivity(snap.activity || {});
     renderDevices(new Set());
     renderSummary();
     renderPairs();
@@ -411,6 +663,8 @@
         dirty.add("devices");
       } else if (type === "message") {
         if (addMessage(data)) messages.push(data);
+      } else if (type === "message_target") {
+        if (retarget(data)) dirty.add("feed");
       } else if (type === "pairs") {
         state.pairs = data;
         for (const r of data.ranking) addEdge(r.from_agent, r.to_agent);
@@ -418,6 +672,8 @@
       } else if (type === "summary") {
         state.summary = data;
         dirty.add("summary");
+      } else if (type === "activity") {
+        offerBubble(data);
       } else if (type === "stale") {
         state.stale[data.source] = data.since_ms;
         dirty.add("stale");
@@ -427,11 +683,13 @@
     if (dirty.has("summary")) renderSummary();
     if (dirty.has("pairs")) { renderPairs(); renderEdgeWeights(); }
     if (dirty.has("stale")) renderStale();
+    const refilter = dirty.has("feed") && state.filter;
     if (messages.length) {
-      prependFeed(messages);
+      if (!refilter) prependFeed(messages);
       renderEmpty();
       scheduleVisuals(messages);
     }
+    if (refilter) renderFeed();
   }
 
   const conn = $("#conn");
@@ -478,5 +736,6 @@
 
   resetGraph();
   renderEmpty();
+  renderActivity({});
   requestAnimationFrame(frame);
 })();

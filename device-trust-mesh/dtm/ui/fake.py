@@ -4,12 +4,18 @@ About every ``EVENT_INTERVAL_MS`` one device sends an enrolment event, the pace 
 ``RATE_PERIOD_MS`` cycle so the pair sparklines have a shape, and the conversation it starts plays out
 as the same records the real sources hand the board: ``/v1/devices`` rows every 500 ms, view records with
 an ``envelope`` for tasks, decisions and statuses, ``agent.decision_latency`` rows for enrolment decisions
-and an ``agent.pair_counts`` window every 5 s. The first leg runs router → risk → enrolment, and enrolment
-sends to compliance and, for a challenge, to step-up; the router resumes a challenged enrolment by sending
-to enrolment once the device answers. Nothing here touches Kafka or HTTP.
+and an ``agent.pair_counts`` window every 5 s. The first leg runs router → risk → enrolment and, for a
+challenge, enrolment → step-up; the router resumes a challenged enrolment by sending to enrolment once the
+device answers. Compliance is sent no tasks: it observes every risk-assessment, enrolment-decision and
+step-up-challenge and answers each with an ``audit-record`` whose outcome is null. Task types, artifact names
+and artifact fields are the ones the real agents emit. The task and decision views commit independently, so
+every ``LATE_RISK_EVERY``-th conversation delivers its risk-assessment after the hand-off it led to and every
+``EARLY_DECISION_EVERY``-th delivers the enrolment decision just before the task that asked for it. Nothing
+here touches Kafka or HTTP.
 """
 import heapq
 import itertools
+import json
 import logging
 import math
 import random
@@ -46,6 +52,11 @@ log = logging.getLogger(__name__)
 SCENARIOS = ("CLEAN", "OUTDATED_OS", "COMPROMISED_OS", "CLEAN", "NEW_DEVICE_ESTABLISHED_ACCOUNT",
              "CLEAN", "IMPOSSIBLE_TRAVEL", "CLEAN")
 _BLOCKING = {"COMPROMISED_OS": "Compromised OS fingerprint", "IMPOSSIBLE_TRAVEL": "Impossible travel"}
+AUDIT_DELAY_MS = 150
+LATE_RISK_EVERY = 3
+LATE_RISK_MS = 400
+EARLY_DECISION_EVERY = 4
+EARLY_DECISION_MS = 20
 
 Action = Callable[[int], list[Delta]]
 
@@ -74,6 +85,7 @@ class FakeFeed:
         self._sent: deque[tuple[int, str, str]] = deque()
         self._lags: deque[int] = deque(maxlen=200)
         self._scenarios = itertools.cycle(SCENARIOS)
+        self._conversations = itertools.count(1)
         self._now_ms: int | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -164,25 +176,30 @@ class FakeFeed:
     def _conversation(self, device_id: str, scenario: str, seq: int, t: int) -> None:
         """Schedule the records one enrolment event produces, starting from its event time ``t``."""
         corr = str(uuid.uuid4())
-        to_risk = self._task(t, device_id, seq, corr, ROUTER, "risk", "ASSESS_RISK")
+        customer_id = self._context[device_id]["customer_id"]
+        to_risk = self._task(t, device_id, seq, corr, ROUTER, "risk", "ASSESS_ENROLMENT",
+                             f"Assess enrolment risk for {device_id} (customer {customer_id})")
         score = 85 if scenario in _BLOCKING else 55 if scenario == "OUTDATED_OS" else 12
         assessed_at = t + self._jitter(500)
-        self._reply(assessed_at, device_id, seq, corr, to_risk, "risk", "risk-assessment",
-                    outcome=None, policy_action=None, risk_score=score, rationale=f"{scenario} signals")
-        to_enrolment = self._task(assessed_at + 100, device_id, seq, corr, "risk", "enrolment", "DECIDE_ENROLMENT")
+        number = next(self._conversations)
+        late = number % LATE_RISK_EVERY == 0
+        self._reply(assessed_at + 100 + LATE_RISK_MS if late else assessed_at, device_id, seq, corr, to_risk,
+                    "risk", "risk-assessment", outcome=None, policy_action=None, risk_score=score,
+                    rationale=f"{scenario} signals", signal_ids=json.dumps([] if scenario == "CLEAN" else [scenario]))
         decide_at = t + self._jitter(1800)
-        to_compliance = self._task(decide_at - 500, device_id, seq, corr, "enrolment", "compliance", "AUDIT")
-        self._reply(decide_at - 200, device_id, seq, corr, to_compliance, "compliance", "audit-record",
-                    outcome="RECORDED", policy_action=None, risk_score=None, rationale="audit written")
         if scenario == "NEW_DEVICE_ESTABLISHED_ACCOUNT":
             decide_at += 6000
+        hand_off_at = decide_at + EARLY_DECISION_MS if number % EARLY_DECISION_EVERY == 0 else assessed_at + 100
+        to_enrolment = self._task(hand_off_at, device_id, seq, corr, "risk", "enrolment",
+                                  "DECIDE_ENROLMENT", f"Decide enrolment for {device_id}: risk {score}")
         if scenario == "OUTDATED_OS":
             self._decide(decide_at, device_id, seq, corr, to_enrolment, t, "CHALLENGED", "CHALLENGE",
                          "Outdated OS; step-up required", "CHALLENGED", "TASK_STATE_AUTH_REQUIRED")
-            to_step_up = self._task(decide_at + 200, device_id, seq, corr, "enrolment", "step-up", "STEP_UP")
+            to_step_up = self._task(decide_at + 200, device_id, seq, corr, "enrolment", "step-up", "STEP_UP",
+                                    f"Step up {device_id}: CHALLENGED, outdated OS")
             self._reply(decide_at + self._jitter(600), device_id, seq, corr, to_step_up, "step-up",
                         "step-up-challenge", outcome=None, policy_action=None, risk_score=None,
-                        rationale="push challenge sent")
+                        rationale="push challenge sent", method="OTP")
             self._at(decide_at + CHALLENGE_ANSWER_MS, lambda due_ms: self._answer(device_id, corr, due_ms))
             return
         if scenario in _BLOCKING:
@@ -197,7 +214,8 @@ class FakeFeed:
         """The device passes its step-up challenge; the router resumes the enrolment."""
         seq = self._next_seq(device_id)
         self._materialize(t, device_id, context_seq=seq, last_event_type="CHALLENGE_PASSED", last_event_time=t)
-        resume = self._task(t, device_id, seq, corr, ROUTER, "enrolment", "RESOLVE_CHALLENGE")
+        resume = self._task(t, device_id, seq, corr, ROUTER, "enrolment", "RESOLVE_CHALLENGE",
+                            f"Resume enrolment for {device_id}: CHALLENGE_PASSED")
         decide_at = t + self._jitter(700)
         self._decide(decide_at, device_id, seq, corr, resume, t, "GRANTED", "ALLOW",
                      "Step-up challenge passed", "TRUSTED", "TASK_STATE_COMPLETED")
@@ -233,12 +251,12 @@ class FakeFeed:
         return Coord(topic, key[1], offset, at_ms)
 
     def _task(self, at_ms: int, device_id: str, seq: int, corr: str, from_agent: str, to_agent: str,
-              task_type: str) -> str:
+              task_type: str, summary: str) -> str:
         message_id = str(uuid.uuid4())
         agent_id = f"flink:{ROUTER}" if from_agent == ROUTER else f"agent:{from_agent}"
         value = {"envelope": self._envelope(message_id, None, agent_id, at_ms, device_id, seq, corr),
                  "from_agent": from_agent, "to_agent": to_agent, "task_type": task_type, "task_id": None,
-                 "message_id": message_id, "reference_task_ids": None, "summary": f"{task_type} {device_id}"}
+                 "message_id": message_id, "reference_task_ids": None, "summary": summary}
 
         def send(due_ms: int) -> list[Delta]:
             self._sent.append((due_ms, from_agent, to_agent))
@@ -248,13 +266,19 @@ class FakeFeed:
 
     def _reply(self, at_ms: int, device_id: str, seq: int, corr: str, causation_id: str, agent: str,
                artifact_name: str, *, outcome: str | None, policy_action: str | None,
-               risk_score: int | None, rationale: str, state: str = "TASK_STATE_COMPLETED") -> None:
+               risk_score: int | None, rationale: str, state: str = "TASK_STATE_COMPLETED",
+               method: str | None = None, signal_ids: str | None = None) -> str:
+        """Schedule an artifact and its status and return the artifact's message id.
+
+        Compliance audits every artifact but its own, ``AUDIT_DELAY_MS`` later, as a reply to it.
+        """
+        message_id = str(uuid.uuid4())
         task_id = str(uuid.uuid4())
-        decision = {"envelope": self._envelope(str(uuid.uuid4()), causation_id, f"agent:{agent}", at_ms,
+        decision = {"envelope": self._envelope(message_id, causation_id, f"agent:{agent}", at_ms,
                                                device_id, seq, corr),
                     "agent": agent, "task_id": task_id, "artifact_name": artifact_name, "outcome": outcome,
                     "policy_action": policy_action, "risk_score": risk_score, "rationale": rationale,
-                    "signal_ids": None, "method": None}
+                    "signal_ids": signal_ids, "method": method}
         status = {"envelope": self._envelope(str(uuid.uuid4()), causation_id, f"agent:{agent}", at_ms + 5,
                                              device_id, seq, corr),
                   "agent": agent, "task_id": task_id, "state": state, "status_time": None, "status_text": None}
@@ -262,6 +286,11 @@ class FakeFeed:
                                                                   self._coord(DECISIONS, device_id, due_ms)))
         self._at(at_ms + 5, lambda due_ms: self._board.apply_status(status,
                                                                     self._coord(STATUSES, device_id, due_ms)))
+        if artifact_name != "audit-record":
+            self._reply(at_ms + AUDIT_DELAY_MS, device_id, seq, corr, message_id, "compliance", "audit-record",
+                        outcome=None, policy_action=None, risk_score=None,
+                        rationale=f"{artifact_name} recorded")
+        return message_id
 
     def _decide(self, at_ms: int, device_id: str, seq: int, corr: str, causation_id: str, event_ms: int,
                 outcome: str, policy_action: str, rationale: str, trust_status: str, state: str) -> None:

@@ -11,6 +11,8 @@
   const MAX_DOTS = 300;
   const ROUTER = "dtm-a2a-task-router";
   const FRESHNESS_TIP = "measured at a 500 ms poll interval";
+  const MATERIALIZATION_TIP = "Kafka record timestamp → applied in context-mcp; "
+    + "mostly the wait for Flink's next checkpoint commit";
   const EMPTY_TEXT = "waiting for traffic — scale device-simulator to 1";
   const SVG_NS = "http://www.w3.org/2000/svg";
   const SEED_LAYOUT = new Map([
@@ -55,6 +57,11 @@
   }
   const hmsMillis = (ms) => `${hms(ms)}.${pad(new Date(ms).getMilliseconds(), 3)}`;
   const seconds = (ms) => (ms == null ? "—" : `${(ms / 1000).toFixed(1)} s`);
+  const lag = (ms, over) => {
+    if (ms == null) return "—";
+    if (over) return `> ${Math.round(ms / 1000)} s`;
+    return ms >= 1000 ? `~${(ms / 1000).toFixed(1)} s` : `~${Math.round(ms)} ms`;
+  };
   const freshness = (ms) => (ms == null ? "—" : `≤ ${Math.round(ms)} ms`);
   const agentLabel = (name) => NODE_LABELS[name] || name || "?";
   const edgeKey = (source, target) => `${source}→${target}`;
@@ -135,9 +142,8 @@
     kpi(`${seconds(s.decision_p50_ms)} / ${seconds(s.decision_p95_ms)}`, "event → decision p50 / p95");
     kpi(`${freshness(s.freshness_p50_ms)} / ${freshness(s.freshness_p95_ms)}`, "freshness p50 / p95", "",
         FRESHNESS_TIP);
-    const lag = (ms, over) => (ms == null ? "—" : over ? `> ${Math.round(ms / 1000)} s` : `${Math.round(ms)} ms`);
     kpi(`${lag(s.context_lag_p50_ms, s.context_lag_p50_over)} / ${lag(s.context_lag_p95_ms, s.context_lag_p95_over)}`,
-        "context materialization p50 / p95");
+        "context materialization p50 / p95", "", MATERIALIZATION_TIP);
   }
 
   // ---- feed ----

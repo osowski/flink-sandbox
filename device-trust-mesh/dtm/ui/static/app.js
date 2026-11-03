@@ -13,7 +13,7 @@
   const EMPTY_TEXT = "waiting for traffic — scale device-simulator to 1";
   const SVG_NS = "http://www.w3.org/2000/svg";
   const SEED_LAYOUT = new Map([
-    [ROUTER, [80, 120]], ["risk", [235, 62]], ["context-mcp", [235, 188]], ["enrolment", [395, 120]],
+    [ROUTER, [80, 120]], ["risk", [235, 62]], ["enrolment", [395, 120]],
     ["compliance", [560, 45]], ["step-up", [560, 120]], ["revocation", [560, 195]],
   ]);
   const NODE_LABELS = { [ROUTER]: "router" };

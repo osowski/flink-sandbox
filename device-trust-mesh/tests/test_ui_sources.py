@@ -196,7 +196,7 @@ class BrokerLossTest(unittest.TestCase):
     def setUp(self):
         self.now = NOW_S
         self.board = Board(clock=lambda: self.now)
-        row = {"window_end": NOW_MS, "from_agent": "a", "to_agent": "b", "message_count": 3}
+        row = {"window_start": NOW_MS - 60_000, "window_end": NOW_MS, "from_agent": "a", "to_agent": "b", "message_count": 3}
         self.reader, self.published = reader(board=self.board, deserialize=lambda topic, raw: row)
         self.reader._clock = lambda: self.now
         self.reader.run_once()

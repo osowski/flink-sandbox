@@ -4,6 +4,7 @@ Each ``apply_*`` method folds one input into the board and returns the deltas a 
 current, as ``(type, payload)`` pairs. One lock guards every structure, so the Kafka consumer, the
 context poller and the SSE handlers can all call in from their own threads.
 """
+import logging
 import math
 import threading
 import time
@@ -17,6 +18,9 @@ ENROLMENT_DECISION = "enrolment-decision"
 STALE_SOURCES = ("kafka", "context")
 RATIONALE_CHARS = 80
 REQUESTER_FACTOR = 4
+MINUTE_MS = 60_000
+
+log = logging.getLogger(__name__)
 
 Delta = tuple[str, dict]
 
@@ -82,7 +86,7 @@ class Board:
         self._latency: OrderedDict[str, dict] = OrderedDict()
         self._feed: deque[dict] = deque(maxlen=feed_limit)
         self._requesters: OrderedDict[str, str | None] = OrderedDict()
-        self._pair_windows: dict[int, dict[tuple[str, str], int]] = {}
+        self._pair_windows: dict[int, dict[tuple[str, str], tuple[int, int]]] = {}
         self._decision_window: list[tuple[int, float]] = []
         self._freshness_window: list[tuple[int, float]] = []
         self._context_lag: tuple[float | None, float | None] = (None, None)
@@ -123,11 +127,20 @@ class Board:
         return self._apply_reply("status", value, coord)
 
     def apply_pair_counts(self, value: dict, coord: Coord) -> list[Delta]:
-        """Fold in an ``agent.pair_counts`` row; a re-delivered row replaces its count."""
+        """Fold in an ``agent.pair_counts`` row; a re-delivered row replaces its count.
+
+        Rows can span different window lengths, so each count is kept with its own window length and
+        read back as a per-minute rate. A row whose window has no positive length is skipped.
+        """
         with self._lock:
             window_end = to_epoch_ms(value["window_end"])
+            length_ms = window_end - to_epoch_ms(value["window_start"])
+            if length_ms <= 0:
+                log.warning("skipping pair count with window length %s ms: %s -> %s", length_ms,
+                            value["from_agent"], value["to_agent"])
+                return []
             pairs = (value["from_agent"], value["to_agent"])
-            self._pair_windows.setdefault(window_end, {})[pairs] = value["message_count"]
+            self._pair_windows.setdefault(window_end, {})[pairs] = (value["message_count"], length_ms)
             for stale in sorted(self._pair_windows)[:-self._history_windows]:
                 del self._pair_windows[stale]
             return [("pairs", self._pairs())]
@@ -252,14 +265,21 @@ class Board:
 
     def _pairs(self) -> dict:
         if not self._pair_windows:
-            return {"window_end_ms": None, "ranking": []}
+            return {"window_end_ms": None, "window_ms": None, "ranking": []}
         windows = sorted(self._pair_windows)
         newest = self._pair_windows[windows[-1]]
+
+        def per_minute(window: int, pair: tuple[str, str]) -> float:
+            count, length_ms = self._pair_windows[window].get(pair, (0, MINUTE_MS))
+            return count * MINUTE_MS / length_ms
+
         ranking = [{"from_agent": f, "to_agent": t, "message_count": count,
-                    "history": [self._pair_windows[w].get((f, t), 0) for w in windows]}
-                   for (f, t), count in newest.items()]
-        ranking.sort(key=lambda r: (-r["message_count"], r["from_agent"], r["to_agent"]))
-        return {"window_end_ms": windows[-1], "ranking": ranking}
+                    "per_minute": per_minute(windows[-1], (f, t)),
+                    "history": [per_minute(w, (f, t)) for w in windows]}
+                   for (f, t), (count, _) in newest.items()]
+        ranking.sort(key=lambda r: (-r["per_minute"], r["from_agent"], r["to_agent"]))
+        return {"window_end_ms": windows[-1], "window_ms": max(length for _, length in newest.values()),
+                "ranking": ranking}
 
     def _summary(self) -> dict:
         self._prune(self._decision_window)

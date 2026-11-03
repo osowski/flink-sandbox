@@ -41,7 +41,7 @@
 
   function freshState() {
     return {
-      devices: new Map(), feed: [], feedKeys: new Set(), pairs: { window_end_ms: null, ranking: [] },
+      devices: new Map(), feed: [], feedKeys: new Set(), pairs: { window_end_ms: null, window_ms: null, ranking: [] },
       summary: null, stale: { kafka: null, context: null }, edges: new Set(), extras: [], filter: null,
     };
   }
@@ -247,12 +247,12 @@
   }
 
   function renderEdgeWeights() {
-    const counts = new Map(state.pairs.ranking.map((r) => [edgeKey(r.from_agent, r.to_agent), r.message_count]));
-    const max = Math.max(1, ...counts.values());
+    const rates = new Map(state.pairs.ranking.map((r) => [edgeKey(r.from_agent, r.to_agent), r.per_minute]));
+    const max = Math.max(1, ...rates.values());
     for (const [key, g] of edgeEls) {
-      const count = counts.get(key) || 0;
-      g.firstChild.setAttribute("stroke-width", (1.5 + 5 * count / max).toFixed(1));
-      g.querySelector(".edge-rate").textContent = count ? `${(count / 60).toFixed(1)}/s` : "";
+      const rate = rates.get(key) || 0;
+      g.firstChild.setAttribute("stroke-width", (1.5 + 5 * rate / max).toFixed(1));
+      g.querySelector(".edge-rate").textContent = rate ? `${(rate / 60).toFixed(1)}/s` : "";
     }
   }
 
@@ -320,19 +320,20 @@
   }
 
   function renderPairs() {
-    const { ranking, window_end_ms: end } = state.pairs;
-    $("#pane-pairs .window").textContent = end ? `window ending ${hms(end)}` : "";
-    const max = Math.max(1, ...ranking.map((r) => r.message_count));
+    const { ranking, window_end_ms: end, window_ms: length } = state.pairs;
+    const average = length == null ? "" : `avg over last ${Math.max(1, Math.round(length / 60000))} min · `;
+    $("#pane-pairs .window").textContent = end ? `${average}window ending ${hms(end)}` : "";
+    const max = Math.max(1, ...ranking.map((r) => r.per_minute));
     pairsBody.replaceChildren(...ranking.map((r) => {
       const tr = el("tr");
       const bar = el("div", { class: "bar" });
-      bar.style.width = `${(100 * r.message_count / max).toFixed(1)}%`;
+      bar.style.width = `${(100 * r.per_minute / max).toFixed(1)}%`;
       const barCell = el("td", { class: "bar-col" });
       barCell.append(bar);
       const sparkCell = el("td", { class: "spark-col" });
       sparkCell.append(sparkline(r.history || []));
       tr.append(el("td", {}, `${agentLabel(r.from_agent)} → ${agentLabel(r.to_agent)}`),
-                el("td", { class: "num" }, String(r.message_count)), barCell, sparkCell);
+                el("td", { class: "num" }, r.per_minute.toFixed(1)), barCell, sparkCell);
       return tr;
     }));
   }

@@ -112,7 +112,7 @@ python -m dtm.simulator.ctl inject OUTDATED_OS --count 3
 
 - **Devices · live:** a summary row and a table of devices with customer, trust status, decision reason, time of the last change, event-to-decision latency and freshness (how long the context table took to reflect the change, measured at a 500 ms poll interval).
 - **Agent traffic:** a graph of the agents with a moving dot per message, and a feed of source, target, kind, device and `topic @ partition:offset`. Clicking an edge filters the feed to that pair.
-- **Busiest agent pairs:** the messages per 60 s window for each source and target pair, with a bar and a sparkline of recent windows.
+- **Busiest agent pairs:** the message rate for each source and target pair as messages per 60 s, normalised from each `agent.pair_counts` row's own window length (the page labels the averaging window, for example `avg over last 5 min`), with a bar and a sparkline of recent windows.
 
 The service reads with `read_committed`, uses a unique `dtm.ui.<uuid>` group id per process, assigns partitions itself and never commits offsets, so a restart does not replay history except for a short warm-up on `agent.pair_counts` and `agent.decision_latency`. `/healthz` returns `kafka_stale_since_ms` and `context_stale_since_ms` (`null` while the source is fresh) and does not fail when an upstream is down.
 

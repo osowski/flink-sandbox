@@ -97,7 +97,7 @@ class StaticFilesTest(unittest.TestCase):
 
     def test_activity_pane_holds_bubbles_and_links_rows(self):
         app_js = _static_text("app.js")
-        self.assertIn("BUBBLE_HOLD_MS = 2000", app_js)
+        self.assertIn("BUBBLE_HOLD_MS = 4000", app_js)
         self.assertIn('"activity"', app_js)
         self.assertIn("data-device-id", app_js)
         for name in ("Risk", "Enrolment", "Step-up", "Compliance", "Revocation"):

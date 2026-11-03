@@ -9,7 +9,7 @@
   const RESYNC_MS = 1000;
   const FEED_LIMIT = 500;
   const MAX_DOTS = 300;
-  const BUBBLE_HOLD_MS = 2000;
+  const BUBBLE_HOLD_MS = 4000;
   const ROUTER = "dtm-a2a-task-router";
   const FRESHNESS_TIP = "measured at a 500 ms poll interval";
   const MATERIALIZATION_TIP = "Kafka record timestamp → applied in context-mcp; "

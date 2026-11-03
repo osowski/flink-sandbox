@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from dtm.ui.fake import FakeFeed
@@ -28,6 +29,29 @@ def run(seconds: float, **kwargs):
     return board, deltas
 
 
+def capture(seconds: float):
+    """Play the feed and return the raw task and decision values the board was handed."""
+    clock = Clock()
+    board = Board(clock=clock)
+    tasks, decisions = [], []
+    apply_task, apply_decision = board.apply_task, board.apply_decision
+
+    def record_task(value, coord):
+        tasks.append(value)
+        return apply_task(value, coord)
+
+    def record_decision(value, coord):
+        decisions.append(value)
+        return apply_decision(value, coord)
+
+    board.apply_task, board.apply_decision = record_task, record_decision
+    feed = FakeFeed(board, lambda deltas: None, clock=clock)
+    for i in range(round(seconds / TICK_S) + 1):
+        clock.now_s = T0_S + i * TICK_S
+        feed.step(clock.now_s)
+    return tasks, decisions
+
+
 class FakeFeedTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -53,9 +77,11 @@ class FakeFeedTest(unittest.TestCase):
         messages = self.of("message")
         edges = {(m["source"], m["target"]) for m in messages if m["kind"] == "task"}
         self.assertEqual(edges, {(ROUTER, "risk"), ("risk", "enrolment"), (ROUTER, "enrolment"),
-                                 ("enrolment", "step-up"), ("enrolment", "compliance")})
+                                 ("enrolment", "step-up")})
         self.assertEqual({m["kind"] for m in messages}, {"task", "decision", "status"})
         for m in messages:
+            if m["source"] == "compliance":
+                continue
             with self.subTest(message=m["message_id"]):
                 self.assertIsNotNone(m["target"])
 
@@ -74,6 +100,56 @@ class FakeFeedTest(unittest.TestCase):
         targets = {m["target"] for m in self.of("message")
                    if m["kind"] == "decision" and m["source"] == "enrolment"}
         self.assertEqual(targets, {"risk", ROUTER})
+
+    def test_task_types_match_the_real_mesh(self):
+        tasks, _ = capture(30)
+        sent = {(v["from_agent"], v["to_agent"], v["task_type"]) for v in tasks}
+        self.assertIn((ROUTER, "risk", "ASSESS_ENROLMENT"), sent)
+        self.assertIn(("risk", "enrolment", "DECIDE_ENROLMENT"), sent)
+        self.assertIn(("enrolment", "step-up", "STEP_UP"), sent)
+        self.assertIn((ROUTER, "enrolment", "RESOLVE_CHALLENGE"), sent)
+        self.assertFalse(any(to == "compliance" for _, to, _ in sent))
+
+    def test_compliance_audits_every_artifact(self):
+        _, decisions = capture(30)
+        audits = [d for d in decisions if d["artifact_name"] == "audit-record"]
+        audited = [d for d in decisions if d["artifact_name"] != "audit-record"]
+        self.assertEqual({d["artifact_name"] for d in audited},
+                         {"risk-assessment", "enrolment-decision", "step-up-challenge"})
+        for d in audited:
+            with self.subTest(artifact=d["artifact_name"], message=d["envelope"]["message_id"]):
+                replies = [a for a in audits if a["envelope"]["causation_id"] == d["envelope"]["message_id"]]
+                self.assertEqual(len(replies), 1)
+                self.assertEqual(replies[0]["agent"], "compliance")
+                self.assertEqual(replies[0]["outcome"], d["outcome"] or d["method"])
+        self.assertEqual(len(audits), len(audited))
+
+    def test_risk_assessment_carries_signal_ids_unless_clean(self):
+        _, decisions = capture(30)
+        by_rationale = {}
+        for d in decisions:
+            if d["artifact_name"] == "risk-assessment":
+                by_rationale[d["rationale"]] = d["signal_ids"]
+        self.assertIsNone(by_rationale["CLEAN signals"])
+        self.assertEqual(json.loads(by_rationale["OUTDATED_OS signals"]), ["OUTDATED_OS"])
+
+    def test_step_up_challenge_carries_a_method(self):
+        _, decisions = capture(30)
+        challenges = [d for d in decisions if d["artifact_name"] == "step-up-challenge"]
+        self.assertTrue(challenges)
+        for d in challenges:
+            self.assertEqual(d["method"], "OTP")
+            self.assertIsNone(d["outcome"])
+            self.assertIsNone(d["policy_action"])
+
+    def test_task_summaries_are_sentences(self):
+        tasks, _ = capture(30)
+        self.assertTrue(tasks)
+        for v in tasks:
+            with self.subTest(summary=v["summary"]):
+                self.assertIn(v["envelope"]["device_id"], v["summary"])
+                self.assertIn(" ", v["summary"])
+                self.assertNotEqual(v["summary"], f"{v['task_type']} {v['envelope']['device_id']}")
 
     def test_record_positions_are_unique(self):
         positions = [(m["topic"], m["partition"], m["offset"]) for m in self.of("message")]

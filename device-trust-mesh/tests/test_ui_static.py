@@ -110,6 +110,14 @@ class StaticFilesTest(unittest.TestCase):
         self.assertIn("fillBubble(node, b)", app_js)
         self.assertIn("card.pending = b;", app_js)
 
+    def test_activity_pane_has_a_kafka_stale_banner(self):
+        html = _static_text("index.html")
+        pane = html[html.index('id="pane-activity"'):html.index('id="activity-cards"')]
+        self.assertIn('<div class="stale" hidden></div>', pane)
+        app_js = _static_text("app.js")
+        self.assertIn('kafka: ["pane-traffic", "pane-pairs", "pane-activity"]', app_js)
+        self.assertIn('"pane-activity": []', app_js)
+
     def test_pairs_pane_sits_under_devices(self):
         html = _static_text("index.html")
         self.assertLess(html.index('"pane-devices"'), html.index('"pane-pairs"'))

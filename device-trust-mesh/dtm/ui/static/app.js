@@ -23,7 +23,7 @@
   const AGENT_CARDS = [["risk", "Risk"], ["enrolment", "Enrolment"], ["step-up", "Step-up"],
     ["compliance", "Compliance"], ["revocation", "Revocation"]];
   const NODE_LABELS = { [ROUTER]: "router" };
-  const STALE_PANES = { kafka: ["pane-traffic", "pane-pairs"], context: ["pane-devices"] };
+  const STALE_PANES = { kafka: ["pane-traffic", "pane-pairs", "pane-activity"], context: ["pane-devices"] };
   const COLORS = [["red", "blocked"], ["amber", "step-up"], ["green", "trusted"], ["grey", "pending"]];
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -492,7 +492,7 @@
 
   // ---- stale banners ----
   function renderStale() {
-    const since = { "pane-devices": [], "pane-traffic": [], "pane-pairs": [] };
+    const since = { "pane-devices": [], "pane-traffic": [], "pane-pairs": [], "pane-activity": [] };
     for (const [source, panes] of Object.entries(STALE_PANES)) {
       const at = state.stale[source];
       if (at != null) for (const pane of panes) since[pane].push(at);

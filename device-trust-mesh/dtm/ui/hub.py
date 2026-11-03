@@ -63,12 +63,12 @@ class Hub:
                 elif sub.pending:
                     pending, sub.pending = sub.pending, []
                     yield {"event": "batch",
-                           "data": json.dumps([{"type": t, "data": d} for t, d in pending])}
+                           "data": json.dumps([{"type": t, "data": d} for t, d in pending], allow_nan=False)}
         finally:
             self._subscribers.discard(sub)
 
     def _snapshot_event(self) -> dict:
-        return {"event": "snapshot", "data": json.dumps(self._board.snapshot())}
+        return {"event": "snapshot", "data": json.dumps(self._board.snapshot(), allow_nan=False)}
 
     def _dispatch(self, deltas: list[Delta]) -> None:
         for sub in self._subscribers:

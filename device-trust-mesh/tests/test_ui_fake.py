@@ -84,6 +84,11 @@ class FakeFeedTest(unittest.TestCase):
         self.assertGreaterEqual(len(ends), 5)
         self.assertEqual({b - a for a, b in zip(ends, ends[1:])}, {5000})
 
+    def test_pair_count_windows_are_five_minutes(self):
+        pairs = self.of("pairs")
+        self.assertEqual({p["window_ms"] for p in pairs}, {300_000})
+        self.assertTrue(all(r["per_minute"] >= 0 for p in pairs for r in p["ranking"]))
+
     def test_summary_has_both_latencies(self):
         summary = self.snapshot["summary"]
         self.assertIsNotNone(summary["decision_p50_ms"])

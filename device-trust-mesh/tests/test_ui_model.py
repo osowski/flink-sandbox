@@ -46,8 +46,8 @@ def device(device_id="dev-0001", status="TRUSTED", seq=1, last_event_time=T0, cu
             "context_seq": seq, "last_event_time": last_event_time, "last_event_type": last_event_type}
 
 
-def pair_count(window_end, from_agent, to_agent, count):
-    return {"window_start": datetime.fromtimestamp((window_end - 60000) / 1000, tz=timezone.utc),
+def pair_count(window_end, from_agent, to_agent, count, window_ms=60000):
+    return {"window_start": datetime.fromtimestamp((window_end - window_ms) / 1000, tz=timezone.utc),
             "window_end": datetime.fromtimestamp(window_end / 1000, tz=timezone.utc),
             "from_agent": from_agent, "to_agent": to_agent, "message_count": count}
 
@@ -261,10 +261,55 @@ class PairsTest(unittest.TestCase):
         deltas = board.apply_pair_counts(pair_count(w2, "risk", "enrolment", 6), coord())
         pairs = payload(deltas, "pairs")
         self.assertEqual(pairs["window_end_ms"], w2)
+        self.assertEqual(pairs["window_ms"], 60000)
         self.assertEqual(pairs["ranking"], [
-            {"from_agent": "risk", "to_agent": "enrolment", "message_count": 6, "history": [9, 6]},
-            {"from_agent": "router", "to_agent": "risk", "message_count": 6, "history": [4, 6]}])
+            {"from_agent": "risk", "to_agent": "enrolment", "message_count": 6, "per_minute": 6.0,
+             "history": [9.0, 6.0]},
+            {"from_agent": "router", "to_agent": "risk", "message_count": 6, "per_minute": 6.0,
+             "history": [4.0, 6.0]}])
         self.assertEqual(board.snapshot()["pairs"], pairs)
+
+    def test_five_minute_window_is_normalised_to_per_minute(self):
+        board = Board(clock=Clock())
+        deltas = board.apply_pair_counts(pair_count(T0, "a", "b", 60, window_ms=300_000), coord())
+        pairs = payload(deltas, "pairs")
+        self.assertEqual(pairs["window_ms"], 300_000)
+        self.assertEqual(pairs["ranking"][0]["message_count"], 60)
+        self.assertEqual(pairs["ranking"][0]["per_minute"], 12.0)
+        self.assertEqual(pairs["ranking"][0]["history"], [12.0])
+
+    def test_one_minute_window_per_minute_is_its_count(self):
+        board = Board(clock=Clock())
+        deltas = board.apply_pair_counts(pair_count(T0, "a", "b", 12, window_ms=60_000), coord())
+        self.assertEqual(payload(deltas, "pairs")["ranking"][0]["per_minute"], 12.0)
+
+    def test_ranking_orders_by_per_minute_across_window_lengths(self):
+        board = Board(clock=Clock())
+        board.apply_pair_counts(pair_count(T0, "slow", "x", 30, window_ms=300_000), coord())
+        board.apply_pair_counts(pair_count(T0, "fast", "x", 10, window_ms=60_000), coord())
+        ranking = board.snapshot()["pairs"]["ranking"]
+        self.assertEqual([(r["from_agent"], r["per_minute"]) for r in ranking], [("fast", 10.0), ("slow", 6.0)])
+
+    def test_history_mixes_window_lengths_as_rates(self):
+        board = Board(clock=Clock())
+        board.apply_pair_counts(pair_count(T0, "a", "b", 6, window_ms=60_000), coord())
+        board.apply_pair_counts(pair_count(T0 + 5000, "a", "b", 30, window_ms=300_000), coord())
+        self.assertEqual(board.snapshot()["pairs"]["ranking"][0]["history"], [6.0, 6.0])
+
+    def test_non_positive_window_length_is_skipped(self):
+        board = Board(clock=Clock())
+        board.apply_pair_counts(pair_count(T0, "a", "b", 5), coord())
+        for window_ms in (0, -1000):
+            with self.assertLogs("dtm.ui.model", "WARNING"):
+                deltas = board.apply_pair_counts(pair_count(T0 + 5000, "c", "d", 9, window_ms=window_ms), coord())
+            self.assertEqual(deltas, [])
+            pairs = board.snapshot()["pairs"]
+            self.assertEqual([r["from_agent"] for r in pairs["ranking"]], ["a"])
+            self.assertEqual(pairs["window_end_ms"], T0)
+
+    def test_empty_pairs_payload(self):
+        self.assertEqual(Board(clock=Clock()).snapshot()["pairs"],
+                         {"window_end_ms": None, "window_ms": None, "ranking": []})
 
     def test_late_older_window_does_not_change_ranking(self):
         board = Board(clock=Clock())
@@ -273,13 +318,13 @@ class PairsTest(unittest.TestCase):
         pairs = payload(deltas, "pairs")
         self.assertEqual(pairs["window_end_ms"], T0 + 10000)
         self.assertEqual(pairs["ranking"][0]["message_count"], 1)
-        self.assertEqual(pairs["ranking"][0]["history"], [99, 1])
+        self.assertEqual(pairs["ranking"][0]["history"], [99.0, 1.0])
 
     def test_only_last_history_windows_are_kept(self):
         board = Board(clock=Clock(), history_windows=2)
         for i in range(4):
             board.apply_pair_counts(pair_count(T0 + i * 5000, "a", "b", i + 1), coord())
-        self.assertEqual(board.snapshot()["pairs"]["ranking"][0]["history"], [3, 4])
+        self.assertEqual(board.snapshot()["pairs"]["ranking"][0]["history"], [3.0, 4.0])
 
     def test_redelivered_row_does_not_double_count(self):
         board = Board(clock=Clock())
@@ -386,7 +431,13 @@ class LatencyTest(unittest.TestCase):
         deltas = self.board.apply_context_lag(12.0, 80.5)
         summary = payload(deltas, "summary")
         self.assertEqual((summary["context_lag_p50_ms"], summary["context_lag_p95_ms"]), (12.0, 80.5))
+        self.assertEqual((summary["context_lag_p50_over"], summary["context_lag_p95_over"]), (False, False))
         self.assertEqual(self.board.snapshot()["summary"], summary)
+
+    def test_context_lag_over_flags(self):
+        deltas = self.board.apply_context_lag(60000.0, 60000.0, p50_over=False, p95_over=True)
+        summary = payload(deltas, "summary")
+        self.assertEqual((summary["context_lag_p50_over"], summary["context_lag_p95_over"]), (False, True))
 
 
 class StaleTest(unittest.TestCase):
@@ -412,7 +463,8 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(snap["summary"], {
             "device_count": 0, "by_color": {"red": 0, "green": 0, "amber": 0, "grey": 0},
             "decision_p50_ms": None, "decision_p95_ms": None, "freshness_p50_ms": None,
-            "freshness_p95_ms": None, "context_lag_p50_ms": None, "context_lag_p95_ms": None})
+            "freshness_p95_ms": None, "context_lag_p50_ms": None, "context_lag_p95_ms": None,
+            "context_lag_p50_over": False, "context_lag_p95_over": False})
         self.assertEqual(snap["stale"], {"kafka": None, "context": None})
 
     def test_snapshot_is_a_copy(self):

@@ -12,7 +12,8 @@ import os
 import threading
 import time
 import uuid
-from typing import Callable
+from collections import deque
+from typing import Callable, NamedTuple
 
 import confluent_kafka
 import httpx
@@ -39,6 +40,7 @@ _STOP_JOIN_S = 5.0
 _PROBE_INTERVAL_S = 5.0
 _PROBE_TIMEOUT_S = 2.0
 _LAG_BUCKET = "dtm_materialization_lag_ms_bucket"
+_LAG_WINDOW_S = 60.0
 _DEFAULT_CONTEXT_URL = "http://device-trust-mesh-serve-svc.device-trust-mesh.svc.cluster.local:8000/context-mcp"
 _HTTP_TIMEOUT_S = 2.0
 
@@ -273,21 +275,43 @@ def parse_lag_buckets(metrics_text: str) -> dict[float, float]:
     return buckets
 
 
-def lag_quantiles(previous: dict[float, float] | None,
-                  current: dict[float, float]) -> tuple[float | None, float | None]:
-    """Return the p50 and p95 of the observations between two scrapes, or ``(None, None)`` if there are none.
+class LagQuantile(NamedTuple):
+    """A lag quantile in ms and whether it lies above the largest finite histogram bound.
 
-    Each is the smallest bucket bound whose cumulative count grew by at least its share of the total growth.
+    ``value_ms`` is always finite or None; when ``over`` is set it is that largest bound, a floor on the lag.
+    """
+    value_ms: float | None
+    over: bool
+
+
+_NO_QUANTILE = LagQuantile(None, False)
+
+
+def lag_quantiles(previous: dict[float, float] | None,
+                  current: dict[float, float]) -> tuple[LagQuantile, LagQuantile]:
+    """Return the p50 and p95 of the observations between two scrapes, empty if there are none.
+
+    Each is interpolated linearly inside the bucket that holds it, as Prometheus ``histogram_quantile``
+    does, from the previous finite bound (0 for the first bucket). One that falls in the ``+Inf`` bucket
+    is reported as the largest finite bound with ``over`` set.
     """
     if previous is None:
-        return None, None
+        return _NO_QUANTILE, _NO_QUANTILE
     growth = {le: count - previous.get(le, 0.0) for le, count in sorted(current.items())}
     total = growth.get(math.inf, max(growth.values(), default=0.0))
-    if total <= 0:
-        return None, None
+    finite = [le for le in growth if math.isfinite(le)]
+    if total <= 0 or not finite:
+        return _NO_QUANTILE, _NO_QUANTILE
 
-    def quantile(q: float) -> float:
-        return next((le for le, grown in growth.items() if grown >= q * total), math.inf)
+    def quantile(q: float) -> LagQuantile:
+        rank = q * total
+        lower_bound, lower_count = 0.0, 0.0
+        for le in finite:
+            if growth[le] >= rank:
+                fraction = (rank - lower_count) / (growth[le] - lower_count)
+                return LagQuantile(lower_bound + (le - lower_bound) * fraction, False)
+            lower_bound, lower_count = le, growth[le]
+        return LagQuantile(finite[-1], True)
 
     return quantile(0.5), quantile(0.95)
 
@@ -311,7 +335,7 @@ class ContextPoller(_Worker):
         self._metrics_every = metrics_every
         self._clock = clock
         self._polls = 0
-        self._previous_buckets: dict[float, float] | None = None
+        self._scrapes: deque[tuple[float, dict[float, float]]] = deque()
 
     def poll_once(self) -> None:
         """Poll the device table, scrape the lag histogram every ``metrics_every`` polls, and publish."""
@@ -340,6 +364,11 @@ class ContextPoller(_Worker):
         self._stop.wait(self._interval_s)
 
     def _scrape_lag(self) -> list[Delta]:
+        """Scrape the lag histogram and publish quantiles over its growth across the last 60 s.
+
+        The first scrape, one after a counter reset and one in an interval with no growth publish nothing,
+        so the board keeps the values it already has.
+        """
         try:
             response = self._http.get(f"{self._base_url}/metrics", timeout=_HTTP_TIMEOUT_S)
             if response.status_code != 200:
@@ -348,8 +377,16 @@ class ContextPoller(_Worker):
             current = parse_lag_buckets(response.text)
         except (httpx.HTTPError, ValueError) as e:
             log.warning("context-mcp metrics scrape failed: %s", e)
-            self._previous_buckets = None
+            self._scrapes.clear()
             return []
-        p50, p95 = lag_quantiles(self._previous_buckets, current)
-        self._previous_buckets = current
-        return self._board.apply_context_lag(p50, p95)
+        now = self._clock()
+        if self._scrapes and any(count < self._scrapes[-1][1].get(le, 0.0) for le, count in current.items()):
+            self._scrapes.clear()
+        while self._scrapes and self._scrapes[0][0] < now - _LAG_WINDOW_S:
+            self._scrapes.popleft()
+        oldest = self._scrapes[0][1] if self._scrapes else None
+        self._scrapes.append((now, current))
+        p50, p95 = lag_quantiles(oldest, current)
+        if p50.value_ms is None and p95.value_ms is None:
+            return []
+        return self._board.apply_context_lag(p50.value_ms, p95.value_ms, p50.over, p95.over)

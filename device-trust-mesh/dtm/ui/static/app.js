@@ -6,10 +6,13 @@
   // Flink commits arrive in bursts, so a batch's dots are spread over at most this long to keep the graph moving.
   const SPREAD_MS = 10000;
   const DOT_MS = 1400;
+  const RESYNC_MS = 1000;
   const FEED_LIMIT = 500;
   const MAX_DOTS = 300;
   const ROUTER = "dtm-a2a-task-router";
   const FRESHNESS_TIP = "measured at a 500 ms poll interval";
+  const MATERIALIZATION_TIP = "Kafka record timestamp → applied in context-mcp; "
+    + "mostly the wait for Flink's next checkpoint commit";
   const EMPTY_TEXT = "waiting for traffic — scale device-simulator to 1";
   const SVG_NS = "http://www.w3.org/2000/svg";
   const SEED_LAYOUT = new Map([
@@ -41,7 +44,7 @@
 
   function freshState() {
     return {
-      devices: new Map(), feed: [], feedKeys: new Set(), pairs: { window_end_ms: null, ranking: [] },
+      devices: new Map(), feed: [], feedKeys: new Set(), pairs: { window_end_ms: null, window_ms: null, ranking: [] },
       summary: null, stale: { kafka: null, context: null }, edges: new Set(), extras: [], filter: null,
     };
   }
@@ -54,6 +57,11 @@
   }
   const hmsMillis = (ms) => `${hms(ms)}.${pad(new Date(ms).getMilliseconds(), 3)}`;
   const seconds = (ms) => (ms == null ? "—" : `${(ms / 1000).toFixed(1)} s`);
+  const lag = (ms, over) => {
+    if (ms == null) return "—";
+    if (over) return `> ${Math.round(ms / 1000)} s`;
+    return ms >= 1000 ? `~${(ms / 1000).toFixed(1)} s` : `~${Math.round(ms)} ms`;
+  };
   const freshness = (ms) => (ms == null ? "—" : `≤ ${Math.round(ms)} ms`);
   const agentLabel = (name) => NODE_LABELS[name] || name || "?";
   const edgeKey = (source, target) => `${source}→${target}`;
@@ -134,8 +142,8 @@
     kpi(`${seconds(s.decision_p50_ms)} / ${seconds(s.decision_p95_ms)}`, "event → decision p50 / p95");
     kpi(`${freshness(s.freshness_p50_ms)} / ${freshness(s.freshness_p95_ms)}`, "freshness p50 / p95", "",
         FRESHNESS_TIP);
-    const lag = (ms) => (ms == null ? "—" : `${Math.round(ms)} ms`);
-    kpi(`${lag(s.context_lag_p50_ms)} / ${lag(s.context_lag_p95_ms)}`, "context materialization p50 / p95");
+    kpi(`${lag(s.context_lag_p50_ms, s.context_lag_p50_over)} / ${lag(s.context_lag_p95_ms, s.context_lag_p95_over)}`,
+        "context materialization p50 / p95", "", MATERIALIZATION_TIP);
   }
 
   // ---- feed ----
@@ -247,12 +255,12 @@
   }
 
   function renderEdgeWeights() {
-    const counts = new Map(state.pairs.ranking.map((r) => [edgeKey(r.from_agent, r.to_agent), r.message_count]));
-    const max = Math.max(1, ...counts.values());
+    const rates = new Map(state.pairs.ranking.map((r) => [edgeKey(r.from_agent, r.to_agent), r.per_minute]));
+    const max = Math.max(1, ...rates.values());
     for (const [key, g] of edgeEls) {
-      const count = counts.get(key) || 0;
-      g.firstChild.setAttribute("stroke-width", (1.5 + 5 * count / max).toFixed(1));
-      g.querySelector(".edge-rate").textContent = count ? `${(count / 60).toFixed(1)}/s` : "";
+      const rate = rates.get(key) || 0;
+      g.firstChild.setAttribute("stroke-width", (1.5 + 5 * rate / max).toFixed(1));
+      g.querySelector(".edge-rate").textContent = rate ? `${(rate / 60).toFixed(1)}/s` : "";
     }
   }
 
@@ -320,19 +328,20 @@
   }
 
   function renderPairs() {
-    const { ranking, window_end_ms: end } = state.pairs;
-    $("#pane-pairs .window").textContent = end ? `window ending ${hms(end)}` : "";
-    const max = Math.max(1, ...ranking.map((r) => r.message_count));
+    const { ranking, window_end_ms: end, window_ms: length } = state.pairs;
+    const average = length == null ? "" : `avg over last ${Math.max(1, Math.round(length / 60000))} min · `;
+    $("#pane-pairs .window").textContent = end ? `${average}window ending ${hms(end)}` : "";
+    const max = Math.max(1, ...ranking.map((r) => r.per_minute));
     pairsBody.replaceChildren(...ranking.map((r) => {
       const tr = el("tr");
       const bar = el("div", { class: "bar" });
-      bar.style.width = `${(100 * r.message_count / max).toFixed(1)}%`;
+      bar.style.width = `${(100 * r.per_minute / max).toFixed(1)}%`;
       const barCell = el("td", { class: "bar-col" });
       barCell.append(bar);
       const sparkCell = el("td", { class: "spark-col" });
       sparkCell.append(sparkline(r.history || []));
       tr.append(el("td", {}, `${agentLabel(r.from_agent)} → ${agentLabel(r.to_agent)}`),
-                el("td", { class: "num" }, String(r.message_count)), barCell, sparkCell);
+                el("td", { class: "num" }, r.per_minute.toFixed(1)), barCell, sparkCell);
       return tr;
     }));
   }
@@ -431,11 +440,41 @@
     conn.className = `conn ${cls}`;
   }
 
-  const source = new EventSource("/events");
-  source.addEventListener("open", () => setConn("live", "live"));
-  source.addEventListener("error", () => setConn("reconnecting…", "down"));
-  source.addEventListener("snapshot", (e) => onSnapshot(JSON.parse(e.data)));
-  source.addEventListener("batch", (e) => onBatch(JSON.parse(e.data)));
+  // A payload that is not valid JSON cannot be applied, and the page would drift from the server if later
+  // batches were applied on top of it. The stream is closed and reopened, and the server answers with a snapshot.
+  let source = null;
+  let resyncTimer = null;
+
+  function resync() {
+    if (source) source.close();
+    source = null;
+    setConn("resyncing…", "down");
+    if (resyncTimer === null) resyncTimer = setTimeout(() => { resyncTimer = null; connect(); }, RESYNC_MS);
+  }
+
+  function handler(apply) {
+    return (e) => {
+      let data;
+      try {
+        data = JSON.parse(e.data);
+      } catch (err) {
+        console.error(`dropping an unparseable ${e.type} event`, err);
+        resync();
+        return;
+      }
+      apply(data);
+    };
+  }
+
+  function connect() {
+    source = new EventSource("/events");
+    source.addEventListener("open", () => setConn("live", "live"));
+    source.addEventListener("error", () => setConn("reconnecting…", "down"));
+    source.addEventListener("snapshot", handler(onSnapshot));
+    source.addEventListener("batch", handler(onBatch));
+  }
+
+  connect();
 
   resetGraph();
   renderEmpty();

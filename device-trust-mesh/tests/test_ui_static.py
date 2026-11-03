@@ -73,6 +73,11 @@ class StaticFilesTest(unittest.TestCase):
     def test_summary_names_context_materialization(self):
         self.assertIn('"context materialization p50 / p95"', _static_text("app.js"))
 
+    def test_materialization_kpi_is_approximate_and_explained(self):
+        app_js = _static_text("app.js")
+        self.assertIn("Kafka record timestamp → applied in context-mcp", app_js)
+        self.assertIn("`~${", app_js)
+
     def test_static_assets_served_with_types(self):
         client = TestClient(build_app(Hub(Board()), lambda: {}))
         for name, media in (("app.js", "javascript"), ("style.css", "text/css")):

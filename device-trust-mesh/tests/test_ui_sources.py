@@ -196,7 +196,7 @@ class BrokerLossTest(unittest.TestCase):
     def setUp(self):
         self.now = NOW_S
         self.board = Board(clock=lambda: self.now)
-        row = {"window_end": NOW_MS, "from_agent": "a", "to_agent": "b", "message_count": 3}
+        row = {"window_start": NOW_MS - 60_000, "window_end": NOW_MS, "from_agent": "a", "to_agent": "b", "message_count": 3}
         self.reader, self.published = reader(board=self.board, deserialize=lambda topic, raw: row)
         self.reader._clock = lambda: self.now
         self.reader.run_once()
@@ -338,6 +338,14 @@ dtm_other_bucket{le="50.0"} 99.0
 
 
 class LagTest(unittest.TestCase):
+    def assertQuantiles(self, result, expected):
+        for got, (value, over) in zip(result, expected):
+            self.assertEqual(got.over, over)
+            if value is None:
+                self.assertIsNone(got.value_ms)
+            else:
+                self.assertAlmostEqual(got.value_ms, value, places=6)
+
     def test_parse_lag_buckets_sums_topics(self):
         self.assertEqual(parse_lag_buckets(BUCKETS_TEXT), {50.0: 3.0, 100.0: 4.0, math.inf: 6.0})
 
@@ -347,22 +355,42 @@ class LagTest(unittest.TestCase):
     def test_lag_quantiles_from_delta(self):
         previous = {50.0: 0, 100.0: 0, math.inf: 0}
         current = {50.0: 6, 100.0: 10, math.inf: 10}
-        self.assertEqual(lag_quantiles(previous, current), (50.0, 100.0))
+        self.assertQuantiles(lag_quantiles(previous, current), ((250 / 6, False), (93.75, False)))
+
+    def test_lag_quantiles_interpolate_inside_the_bucket(self):
+        previous = {5000.0: 0, 10000.0: 0, math.inf: 0}
+        current = {5000.0: 0, 10000.0: 10, math.inf: 10}
+        self.assertQuantiles(lag_quantiles(previous, current), ((7500.0, False), (9750.0, False)))
+
+    def test_lag_quantiles_first_bucket_starts_at_zero(self):
+        previous = {5000.0: 0, 10000.0: 0, math.inf: 0}
+        current = {5000.0: 10, 10000.0: 10, math.inf: 10}
+        self.assertQuantiles(lag_quantiles(previous, current), ((2500.0, False), (4750.0, False)))
 
     def test_lag_quantiles_uses_change_not_totals(self):
         previous = {50.0: 100, 100.0: 100, math.inf: 100}
         current = {50.0: 100, 100.0: 110, math.inf: 110}
-        self.assertEqual(lag_quantiles(previous, current), (100.0, 100.0))
+        self.assertQuantiles(lag_quantiles(previous, current), ((75.0, False), (97.5, False)))
 
     def test_lag_quantiles_tail_in_inf(self):
         previous = {50.0: 0, math.inf: 0}
         current = {50.0: 9, math.inf: 10}
-        self.assertEqual(lag_quantiles(previous, current), (50.0, math.inf))
+        self.assertQuantiles(lag_quantiles(previous, current), ((250 / 9, False), (50.0, True)))
+
+    def test_lag_quantiles_are_always_finite(self):
+        previous = {50.0: 0, 100.0: 0, math.inf: 0}
+        current = {50.0: 0, 100.0: 0, math.inf: 4}
+        for quantile in lag_quantiles(previous, current):
+            self.assertEqual(quantile, (100.0, True))
+            self.assertTrue(math.isfinite(quantile[0]))
+
+    def test_lag_quantiles_with_no_finite_bound_is_none(self):
+        self.assertEqual(lag_quantiles({math.inf: 0}, {math.inf: 4}), ((None, False), (None, False)))
 
     def test_lag_quantiles_no_change_is_none(self):
         same = {50.0: 3, math.inf: 3}
-        self.assertEqual(lag_quantiles(same, dict(same)), (None, None))
-        self.assertEqual(lag_quantiles(None, same), (None, None))
+        self.assertEqual(lag_quantiles(same, dict(same)), ((None, False), (None, False)))
+        self.assertEqual(lag_quantiles(None, same), ((None, False), (None, False)))
 
 
 DEVICE = {"device_id": "dev-0001", "customer_id": "c-1", "trust_status": "TRUSTED", "context_seq": 1,
@@ -460,8 +488,80 @@ class PollerTest(unittest.TestCase):
             p.poll_once()
         self.assertEqual(len(scrapes), 2)
         lags = [c for c in p._board.calls if c[0] == "apply_context_lag"]
-        self.assertEqual(lags, [("apply_context_lag", None, None), ("apply_context_lag", 50.0, 50.0)])
+        self.assertEqual(lags, [("apply_context_lag", 25.0, 47.5, False, False)])
         self.assertEqual([c[0] for c in p._board.calls].count("apply_devices"), 6)
+
+    def lag_scraper(self):
+        """Return ``(board, scrape)``; ``scrape(at_s, buckets)`` polls at that time, ``buckets`` None being a failed scrape."""
+        now = [0.0]
+        served = []
+
+        def handler(request):
+            if not request.url.path.endswith("/metrics"):
+                return httpx.Response(200, json=[])
+            if served[-1] is None:
+                return httpx.Response(500)
+            return httpx.Response(200, text="".join(
+                f'dtm_materialization_lag_ms_bucket{{le="{le}",topic="t"}} {count}\n'
+                for le, count in served[-1].items()))
+        board = Board(clock=lambda: now[0])
+        p = ContextPoller(board, httpx.Client(transport=httpx.MockTransport(handler)), lambda deltas: None,
+                          BASE, metrics_every=1, clock=lambda: now[0])
+
+        def scrape(at_s, buckets):
+            now[0] = at_s
+            served.append(buckets)
+            p.poll_once()
+        return board, scrape
+
+    @staticmethod
+    def lag(board):
+        summary = board.snapshot()["summary"]
+        return summary["context_lag_p50_ms"], summary["context_lag_p95_ms"]
+
+    @staticmethod
+    def buckets(low, high):
+        return {"5000.0": low, "10000.0": high, "+Inf": high}
+
+    def test_lag_window_diffs_against_the_oldest_scrape_within_sixty_seconds(self):
+        board, scrape = self.lag_scraper()
+        scrape(0, self.buckets(0, 0))
+        scrape(30, self.buckets(0, 10))
+        scrape(50, self.buckets(10, 20))
+        scrape(65, self.buckets(10, 30))
+        # Against the scrape at 30 s: 10 in (0, 5000] and 10 in (5000, 10000]. Against the one at 50 s: 10 in
+        # (5000, 10000], which would give 7500.
+        self.assertEqual(self.lag(board)[0], 5000.0)
+
+    def test_lag_counter_reset_clears_the_window(self):
+        board, scrape = self.lag_scraper()
+        scrape(0, self.buckets(0, 0))
+        scrape(5, self.buckets(0, 10))
+        self.assertEqual(self.lag(board)[0], 7500.0)
+        scrape(10, self.buckets(0, 2))
+        self.assertEqual(self.lag(board)[0], 7500.0)
+        scrape(15, self.buckets(4, 6))
+        # Against the scrape at 10 s, 4 observations all in (0, 5000]; against the one at 0 s it would be 3750.
+        self.assertEqual(self.lag(board)[0], 2500.0)
+
+    def test_lag_with_no_growth_keeps_the_last_values(self):
+        board, scrape = self.lag_scraper()
+        scrape(0, self.buckets(0, 0))
+        scrape(5, self.buckets(0, 10))
+        self.assertEqual(self.lag(board), (7500.0, 9750.0))
+        scrape(70, self.buckets(0, 10))
+        scrape(75, self.buckets(0, 10))
+        self.assertEqual(self.lag(board), (7500.0, 9750.0))
+
+    def test_lag_scrape_failure_restarts_the_window(self):
+        board, scrape = self.lag_scraper()
+        scrape(0, self.buckets(0, 0))
+        with self.assertLogs("dtm.ui.sources", "WARNING"):
+            scrape(5, None)
+        scrape(10, self.buckets(0, 10))
+        self.assertEqual(self.lag(board), (None, None))
+        scrape(15, self.buckets(0, 20))
+        self.assertEqual(self.lag(board)[0], 7500.0)
 
     def test_metrics_failure_does_not_mark_context_stale(self):
         def handler(request):

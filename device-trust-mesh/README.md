@@ -1,6 +1,6 @@
 # device-trust-mesh
 
-Source for the **Agentic Device Trust Mesh** demo: a device simulator, an RTCE-style context server (`context-mcp`) and A2A agents that run on Ray Serve (KubeRay) against Confluent Platform and CP Flink.
+Source for the **Agentic Device Trust Mesh** demo: a device simulator, a live UI, an RTCE-style context server (`context-mcp`) and A2A agents that run on Ray Serve (KubeRay) against Confluent Platform and CP Flink.
 
 The GitOps side (topics, schemas, Flink statements, KubeRay, the `RayService` manifest) lives in [osowski/confluent-platform-gitops](https://github.com/osowski/confluent-platform-gitops), under `workloads/device-trust-mesh/`. Its README is the use-case doc: architecture, the A2A-over-Kafka binding, the topic catalogue and runtime configuration. Work is tracked in [Epic #441](https://github.com/osowski/confluent-platform-gitops/issues/441).
 
@@ -11,6 +11,7 @@ The GitOps side (topics, schemas, Flink statements, KubeRay, the `RayService` ma
 | `dtm/common/` | `envelope` (mesh envelope), `ids` (deterministic ids), `a2a` (A2A v1.0 record builders and validation), `bus` (`AgentBus`, the agents' only Kafka access: A2A Kafka binding, consume allow-list, replay knobs), `kafka` (client settings), `metrics` and `schemas` (vendored schema loaders) |
 | `dtm/simulator/` | Device simulator: device pool bounded by `DEVICE_CAP`, risk scenarios, closed loop on `device.policy-commands` |
 | `dtm/mesh/` | Ray Serve application: `runtime` (`AgentRuntime`: poll loop, hot reload, Agent Card lifecycle), `llm` (`LLMProvider`: Ollama, recorded replay, llm-interactions records), `context/` (context table, materializer, MCP tools and REST mirror), `context_mcp` (the `dtm.mesh.context_mcp:app` Serve entry point), `agents/` (the five agents, their shared `kit` and the `AgentHost` Serve wrapper) and one Serve entry point per agent |
+| `dtm/ui/` | UI service: an in-memory board fed from Kafka and `context-mcp`, a Server-Sent Events stream and the static page it serves |
 | `dtm/prompts/` | Packaged default prompts: `risk.v1`, `enrolment.v1`, `revocation.v1` |
 | `dtm/schemas/` | Vendored copy of the GitOps repo's generated Avro and A2A JSON Schemas (`SOURCE` records the commit), shipped as package data; `scripts/sync_schemas.py` refreshes it |
 | `tests/` | Unit tests |
@@ -105,23 +106,45 @@ python -m dtm.simulator.ctl inject IMPOSSIBLE_TRAVEL  # queue one ahead of the m
 python -m dtm.simulator.ctl inject OUTDATED_OS --count 3
 ```
 
+## UI
+
+`python -m dtm.ui` serves a single live page on `DTM_UI_PORT`. It reads five topics (`agent.tasks_human_readable`, `agent.decisions_human_readable`, `agent.task-status_human_readable`, `agent.pair_counts`, `agent.decision_latency`) and polls `context-mcp` for the device table, keeps the result in memory, and pushes changes to the browser over Server-Sent Events (`/events`). The page has three panes, each of which can be maximized:
+
+- **Devices · live:** a summary row and a table of devices with customer, trust status, decision reason, time of the last change, event-to-decision latency and freshness (how long the context table took to reflect the change, measured at a 500 ms poll interval).
+- **Agent traffic:** a graph of the agents with a moving dot per message, and a feed of source, target, kind, device and `topic @ partition:offset`. Clicking an edge filters the feed to that pair.
+- **Busiest agent pairs:** the messages per 60 s window for each source and target pair, with a bar and a sparkline of recent windows.
+
+The service reads with `read_committed`, uses a unique `dtm.ui.<uuid>` group id per process, assigns partitions itself and never commits offsets, so a restart does not replay history except for a short warm-up on `agent.pair_counts` and `agent.decision_latency`. `/healthz` returns `kafka_stale_since_ms` and `context_stale_since_ms` (`null` while the source is fresh) and does not fail when an upstream is down.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DTM_UI_CONTEXT_URL` | `http://device-trust-mesh-serve-svc.device-trust-mesh.svc.cluster.local:8000/context-mcp` | `context-mcp` base URL for the device table and the materialization lag histogram |
+| `DTM_UI_PORT` | `8080` | Port the page and `/events` listen on |
+| `KAFKA_BOOTSTRAP_SERVERS` | `kafka.kafka.svc.cluster.local:9071` | Kafka endpoint |
+| `SCHEMA_REGISTRY_URL` | `http://schemaregistry.kafka.svc.cluster.local:8081` | Schema Registry endpoint |
+
+The Kafka listeners are only reachable inside the cluster, so for local work run `python -m dtm.ui --fake`. It feeds the board synthetic data and needs no Kafka or `context-mcp`; open `http://localhost:8080/`.
+
+In a larger deployment, a Confluent REST Proxy, deployed through CFK's KafkaRestProxy resource and using the v2 consumer API, would probably be more dependable over the long run than a custom UI service. The flink-demo cluster only has the brokers' embedded v3 REST API (:8090), which cannot consume. A REST Proxy used from the browser would also have to poll for new records, which works against the freshness story. The custom service is the right choice for the prototype, and its narrow browser-facing contract leaves room to put REST Proxy behind it later.
+
 ## Images
 
 | Image | Dockerfile | Base | Runs |
 |---|---|---|---|
 | `quay.io/osowski/device-trust-mesh-simulator` | `Dockerfile.simulator` | `python:3.12.16-slim` | `python -m dtm.simulator` (non-root) |
 | `quay.io/osowski/device-trust-mesh-ray` | `Dockerfile.ray` | `rayproject/ray:2.59.0-py312-cpu` | The RayService head and workers; Serve imports `dtm.mesh.*:app` |
+| `quay.io/osowski/device-trust-mesh-ui` | `Dockerfile.ui` | `python:3.12.16-slim` | `python -m dtm.ui` on port 8080 (non-root) |
 
-The [`device-trust-mesh-build-images.yml`](../.github/workflows/device-trust-mesh-build-images.yml) workflow builds both for `linux/amd64` and `linux/arm64`. Pull requests build without pushing; pushes to `main`, `device-trust-mesh-v*` tags and manual runs push to Quay. Both images share one version: tags look like `v1.0.0-202611021200` (`<repo-version>-<UTC build timestamp>`), plus a floating `:latest`. `<repo-version>` comes from the most recent `device-trust-mesh-v*` tag (`v0.0.0` until one exists). Cut a release by pushing a tag, then take the exact `<version_tag>` from the run it triggered:
+The [`device-trust-mesh-build-images.yml`](../.github/workflows/device-trust-mesh-build-images.yml) workflow builds all three for `linux/amd64` and `linux/arm64`. Pull requests build without pushing; pushes to `main`, `device-trust-mesh-v*` tags and manual runs push to Quay. All three images share one version: tags look like `v1.0.0-202611021200` (`<repo-version>-<UTC build timestamp>`), plus a floating `:latest`. `<repo-version>` comes from the most recent `device-trust-mesh-v*` tag (`v0.0.0` until one exists). Cut a release by pushing a tag, then take the exact `<version_tag>` from the run it triggered:
 
 ```bash
 git tag device-trust-mesh-v1.0.0
 git push-external origin device-trust-mesh-v1.0.0
 ```
 
-The dependency pins live in `pyproject.toml` and the base images in the two Dockerfiles. The simulator installs the package without the `serve` extra, so it carries no Ray. When the Ray base image changes, change the `ray[serve]` pin and the RayService `rayVersion` with it.
+The dependency pins live in `pyproject.toml` and the base images in the three Dockerfiles. The simulator and UI images install the package without the `serve` extra, so they carry no Ray. When the Ray base image changes, change the `ray[serve]` pin and the RayService `rayVersion` with it.
 
-`./build.sh [tag]` builds both images locally for the host platform (default tag `dev`).
+`./build.sh [tag]` builds all three images locally for the host platform (default tag `dev`).
 
 ## Development
 

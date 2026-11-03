@@ -1,0 +1,11 @@
+# Device trust mesh UI image. Build context is device-trust-mesh/.
+FROM python:3.12.16-slim
+
+COPY pyproject.toml /tmp/dtm/
+COPY dtm /tmp/dtm/dtm
+RUN pip install --no-cache-dir /tmp/dtm \
+    && rm -rf /tmp/dtm
+
+USER 10001
+EXPOSE 8080
+CMD ["python", "-u", "-m", "dtm.ui"]

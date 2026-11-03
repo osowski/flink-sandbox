@@ -171,6 +171,17 @@ class FakeFeedTest(unittest.TestCase):
         self.assertIsNotNone(summary["freshness_p50_ms"])
         self.assertIsNotNone(summary["context_lag_p50_ms"])
 
+    def test_every_working_agent_ends_with_a_bubble(self):
+        activity = self.snapshot["activity"]
+        self.assertLessEqual({"risk", "enrolment", "step-up", "compliance"}, set(activity))
+        for agent, bubble in activity.items():
+            with self.subTest(agent=agent):
+                self.assertNotIn(None, (bubble["to"], bubble["action"]))
+                self.assertNotEqual(agent, ROUTER)
+        json.dumps(self.snapshot, allow_nan=False)
+        for bubble in self.of("activity"):
+            json.dumps(bubble, allow_nan=False)
+
     def test_same_time_twice_adds_nothing(self):
         clock = Clock()
         published = []

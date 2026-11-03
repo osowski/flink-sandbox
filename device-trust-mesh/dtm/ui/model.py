@@ -16,10 +16,21 @@ from typing import Callable
 from dtm.common.envelope import to_epoch_ms
 
 ENROLMENT_DECISION = "enrolment-decision"
+RISK_ASSESSMENT = "risk-assessment"
+STEP_UP_CHALLENGE = "step-up-challenge"
+AUDIT_RECORD = "audit-record"
+CHALLENGED = "CHALLENGED"
+ROUTER = "dtm-a2a-task-router"
 STALE_SOURCES = ("kafka", "context")
 RATIONALE_CHARS = 80
 REQUESTER_FACTOR = 4
 MINUTE_MS = 60_000
+
+AGENT_NAMES = {"risk": "Risk", "enrolment": "Enrolment", "step-up": "Step-up", "compliance": "Compliance",
+               "revocation": "Revocation"}
+TASK_PURPOSE = {"ASSESS_ENROLMENT": "assess risk", "DECIDE_ENROLMENT": "decide enrolment",
+                "STEP_UP": "verify identity", "REVOKE": "revoke trust", "RESOLVE_CHALLENGE": "resolve challenge"}
+ACTION_COLORS = {"ALLOW": "green", "READ_ONLY": "green", "CHALLENGE": "amber", "BLOCK": "red"}
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +110,8 @@ class Board:
         self._feed: deque[dict] = deque(maxlen=feed_limit)
         self._requesters: OrderedDict[str, str | None] = OrderedDict()
         self._rows: OrderedDict[str, dict] = OrderedDict()
+        self._held: OrderedDict[str, dict] = OrderedDict()
+        self._activity: dict[str, dict] = {}
         self._pair_windows: dict[int, dict[tuple[str, str], tuple[int, int]]] = {}
         self._decision_window: list[tuple[int, float]] = []
         self._freshness_window: list[tuple[int, float]] = []
@@ -134,8 +147,9 @@ class Board:
             self._requesters[message_id] = value.get("from_agent")
             while len(self._requesters) > self._feed_limit * REQUESTER_FACTOR:
                 self._requesters.popitem(last=False)
-            return [self._message("task", value, value.get("from_agent"), value.get("to_agent"),
-                                  message_id, coord)]
+            deltas = [self._message("task", value, value.get("from_agent"), value.get("to_agent"),
+                                    message_id, coord)]
+            return deltas + self._activity_delta(self._task_bubble(value, message_id))
 
     def apply_decision(self, value: dict, coord: Coord) -> list[Delta]:
         """Fold in an ``agent.decisions_human_readable`` row, targeted at the agent that asked."""
@@ -223,12 +237,13 @@ class Board:
             return [("stale", {"source": source, "since_ms": None})]
 
     def snapshot(self) -> dict:
-        """Return everything a new client needs: devices (latest change first), feed (newest first), pairs, summary and stale flags."""
+        """Return everything a new client needs: devices (latest change first), feed (newest first), pairs, summary, stale flags and each agent's latest bubble."""
         with self._lock:
             devices = sorted(self._devices.values(), key=lambda r: (-r["changed_at_ms"], r["device_id"]))
             return {"devices": [dict(r) for r in devices],
                     "feed": [dict(m) for m in reversed(self._feed)],
-                    "pairs": self._pairs(), "summary": self._summary(), "stale": dict(self._stale)}
+                    "pairs": self._pairs(), "summary": self._summary(), "stale": dict(self._stale),
+                    "activity": {agent: dict(b) for agent, b in self._activity.items()}}
 
     def message(self, message_id: str) -> dict | None:
         """Return ``{"message": feed entry, "row": row as applied}`` for a held message id, else None."""
@@ -271,7 +286,10 @@ class Board:
         with self._lock:
             envelope = value["envelope"]
             target = self._requesters.get(envelope.get("causation_id"))
-            return [self._message(kind, value, value.get("agent"), target, envelope["message_id"], coord)]
+            deltas = [self._message(kind, value, value.get("agent"), target, envelope["message_id"], coord)]
+            if kind == "decision":
+                deltas += self._activity_delta(self._decision_bubble(value, target))
+            return deltas
 
     def _message(self, kind: str, value: dict, source: str | None, target: str | None,
                  message_id: str, coord: Coord) -> Delta:
@@ -286,6 +304,73 @@ class Board:
         while len(self._rows) > self._feed_limit:
             self._rows.popitem(last=False)
         return "message", dict(message)
+
+    def _task_bubble(self, value: dict, message_id: str) -> dict | None:
+        """Return the speech bubble a hand-off sets for its sender, or None for the router."""
+        sender = value.get("from_agent")
+        if not sender or sender == ROUTER:
+            return None
+        task_type = value.get("task_type")
+        purpose = TASK_PURPOSE.get(task_type, (task_type or "task").lower().replace("_", " "))
+        held = self._held.get(value["envelope"].get("correlation_id"), {})
+        action, color = purpose, "neutral"
+        if sender == "risk" and held.get("risk_score") is not None:
+            action = f"{purpose} · risk {held['risk_score']}"
+        elif held.get("challenged"):
+            action, color = f"{CHALLENGED} → {purpose}", "amber"
+        to_agent = value.get("to_agent")
+        return self._bubble(sender, AGENT_NAMES.get(to_agent, to_agent or "—"), action, color, value, message_id)
+
+    def _decision_bubble(self, value: dict, target: str | None) -> dict | None:
+        """Return the speech bubble an artifact sets for its agent; an enrichment is held for the hand-off instead."""
+        agent = value.get("agent")
+        artifact_name = value.get("artifact_name")
+        outcome, policy_action = value.get("outcome"), value.get("policy_action")
+        message_id = value["envelope"]["message_id"]
+        if artifact_name == RISK_ASSESSMENT:
+            self._hold(value, risk_score=value.get("risk_score"))
+            return None
+        if not agent:
+            return None
+        if artifact_name == STEP_UP_CHALLENGE:
+            method = value.get("method")
+            action = f"challenge → {method}" if method else "challenge"
+            return self._bubble(agent, "device", action, "amber", value, message_id)
+        if artifact_name == AUDIT_RECORD:
+            audited = value.get("outcome")
+            return self._bubble(agent, "audit log", f"audited {audited}" if audited else "audited",
+                                "neutral", value, message_id)
+        if outcome == CHALLENGED:
+            self._hold(value, challenged=True)
+            return None
+        to = "device" if policy_action else AGENT_NAMES.get(target, target) if target else "—"
+        action = " → ".join(p for p in (outcome, policy_action) if p) or artifact_name or "decision"
+        return self._bubble(agent, to, action, ACTION_COLORS.get(policy_action, "neutral"), value, message_id)
+
+    def _hold(self, value: dict, **fields) -> None:
+        """Keep an enrichment for the hand-off on the same correlation, which may already have passed."""
+        correlation_id = value["envelope"].get("correlation_id")
+        if correlation_id is None:
+            return
+        self._held.setdefault(correlation_id, {}).update(fields)
+        self._held.move_to_end(correlation_id)
+        while len(self._held) > self._feed_limit * REQUESTER_FACTOR:
+            self._held.popitem(last=False)
+
+    def _bubble(self, agent: str, to: str, action: str, color: str, value: dict, message_id: str) -> dict:
+        envelope = value["envelope"]
+        device_id = envelope["device_id"]
+        customer_id = envelope.get("customer_id") or self._devices.get(device_id, {}).get("customer_id")
+        return {"agent": agent, "to": to, "customer_id": customer_id, "device_id": device_id,
+                "action": action, "color": color, "message_id": message_id,
+                "time_ms": to_epoch_ms(envelope["event_time"])}
+
+    def _activity_delta(self, bubble: dict | None) -> list[Delta]:
+        """Record ``bubble`` as its agent's latest and return its delta, or nothing when there is none."""
+        if bubble is None:
+            return []
+        self._activity[bubble["agent"]] = bubble
+        return [("activity", dict(bubble))]
 
     def _observe(self, window: list, at_ms: int, value: float) -> None:
         window.append((at_ms, value))

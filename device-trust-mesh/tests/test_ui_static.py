@@ -104,6 +104,12 @@ class StaticFilesTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn(f'"{name}"', app_js)
 
+    def test_same_bubble_updates_in_place(self):
+        app_js = _static_text("app.js")
+        self.assertIn("function updateShown(card, b)", app_js)
+        self.assertIn("fillBubble(node, b)", app_js)
+        self.assertIn("card.pending = b;", app_js)
+
     def test_pairs_pane_sits_under_devices(self):
         html = _static_text("index.html")
         self.assertLess(html.index('"pane-devices"'), html.index('"pane-pairs"'))
@@ -118,6 +124,22 @@ class StaticFilesTest(unittest.TestCase):
         self.assertIn("/messages/${encodeURIComponent(", app_js)
         self.assertIn("no longer held — the UI keeps the most recent", app_js)
         self.assertIn("showModal()", app_js)
+
+    def test_viewer_header_never_shows_a_question_mark(self):
+        app_js = _static_text("app.js")
+        self.assertIn("openMessage(target.dataset.messageId, target.dataset.to)", app_js)
+        self.assertIn('const viewerName = (agent) => (agent ? agentLabel(agent) : "—");', app_js)
+
+    def test_viewer_leaves_out_empty_lists(self):
+        self.assertIn('v === "[]" || (Array.isArray(v) && v.length === 0)', _static_text("app.js"))
+
+    def test_dialogs_close_only_on_a_true_backdrop_click(self):
+        app_js = _static_text("app.js")
+        self.assertIn('dialog.addEventListener("mousedown"', app_js)
+        self.assertIn("closeOnBackdrop(viewer);", app_js)
+        self.assertIn("closeOnBackdrop(explainer);", app_js)
+        self.assertNotIn("if (e.target === viewer) viewer.close()", app_js)
+        self.assertNotIn("if (e.target === explainer) explainer.close()", app_js)
 
     def test_escape_leaves_maximized_pane_while_a_dialog_is_open(self):
         self.assertIn('document.querySelector("dialog[open]")', _static_text("app.js"))

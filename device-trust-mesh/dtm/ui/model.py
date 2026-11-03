@@ -20,6 +20,8 @@ RISK_ASSESSMENT = "risk-assessment"
 STEP_UP_CHALLENGE = "step-up-challenge"
 AUDIT_RECORD = "audit-record"
 CHALLENGED = "CHALLENGED"
+AUDIT_LOG = "audit log"
+COMPLIANCE = "compliance"
 ROUTER = "dtm-a2a-task-router"
 STEP_UP_HAND_OFF = ("enrolment", "step-up", "STEP_UP")
 STALE_SOURCES = ("kafka", "context")
@@ -110,6 +112,7 @@ class Board:
         self._latency: OrderedDict[str, dict] = OrderedDict()
         self._feed: deque[dict] = deque(maxlen=feed_limit)
         self._requesters: OrderedDict[str, str | None] = OrderedDict()
+        self._orphans: OrderedDict[str, list[str]] = OrderedDict()
         self._rows: OrderedDict[str, dict] = OrderedDict()
         self._held: OrderedDict[str, dict] = OrderedDict()
         self._activity: dict[str, dict] = {}
@@ -142,7 +145,10 @@ class Board:
             return deltas
 
     def apply_task(self, value: dict, coord: Coord) -> list[Delta]:
-        """Fold in an ``agent.tasks_human_readable`` row and remember who asked, for later replies."""
+        """Fold in an ``agent.tasks_human_readable`` row and remember who asked, for later replies.
+
+        Replies that arrived before this task had no target; each gets its sender now, as a ``message_target`` delta.
+        """
         with self._lock:
             envelope = value["envelope"]
             message_id = value.get("message_id") or envelope["message_id"]
@@ -154,7 +160,7 @@ class Board:
             bubble = self._task_bubble(value, message_id)
             if bubble is not None:
                 self._hand_offs[bubble["agent"]] = (message_id, json_safe(value))
-            return deltas + self._activity_delta(bubble)
+            return deltas + self._activity_delta(bubble) + self._fill_targets(message_id)
 
     def apply_decision(self, value: dict, coord: Coord) -> list[Delta]:
         """Fold in an ``agent.decisions_human_readable`` row, targeted at the agent that asked."""
@@ -290,11 +296,41 @@ class Board:
     def _apply_reply(self, kind: str, value: dict, coord: Coord) -> list[Delta]:
         with self._lock:
             envelope = value["envelope"]
-            target = self._requesters.get(envelope.get("causation_id"))
-            deltas = [self._message(kind, value, value.get("agent"), target, envelope["message_id"], coord)]
+            agent = value.get("agent")
+            causation_id = envelope.get("causation_id")
+            requester = self._requesters.get(causation_id)
+            target = AUDIT_LOG if agent == COMPLIANCE else requester
+            message_id = envelope["message_id"]
+            deltas = [self._message(kind, value, agent, target, message_id, coord)]
+            if target is None and causation_id is not None and causation_id not in self._requesters:
+                self._remember_orphan(causation_id, message_id)
             if kind == "decision":
-                deltas += self._activity_delta(self._decision_bubble(value, target))
+                deltas += self._activity_delta(self._decision_bubble(value, requester))
             return deltas
+
+    def _remember_orphan(self, causation_id: str, message_id: str) -> None:
+        """Keep a reply whose task has not arrived, so the task can name its target when it does."""
+        waiting = self._orphans.setdefault(causation_id, [])
+        if message_id not in waiting:
+            waiting.append(message_id)
+        self._orphans.move_to_end(causation_id)
+        while len(self._orphans) > self._feed_limit * REQUESTER_FACTOR:
+            self._orphans.popitem(last=False)
+
+    def _fill_targets(self, task_message_id: str) -> list[Delta]:
+        """Set the target of every held reply that was waiting on ``task_message_id``; return a delta for each."""
+        requester = self._requesters.get(task_message_id)
+        deltas: list[Delta] = []
+        for message_id in self._orphans.pop(task_message_id, []):
+            held = self._rows.get(message_id)
+            if requester is None or held is None:
+                continue
+            message = held["message"]
+            message["target"] = requester
+            deltas.append(("message_target", {"message_id": message_id, "topic": message["topic"],
+                                              "partition": message["partition"], "offset": message["offset"],
+                                              "target": requester}))
+        return deltas
 
     def _message(self, kind: str, value: dict, source: str | None, target: str | None,
                  message_id: str, coord: Coord) -> Delta:
@@ -351,7 +387,7 @@ class Board:
         if artifact_name == AUDIT_RECORD:
             subject = self._rows.get(value["envelope"].get("causation_id"), {}).get("row", {})
             audited = outcome or subject.get("outcome") or subject.get("method")
-            return self._bubble(agent, "audit log", f"audited {audited}" if audited else "audited",
+            return self._bubble(agent, AUDIT_LOG, f"audited {audited}" if audited else "audited",
                                 "neutral", value, message_id)
         if outcome == CHALLENGED:
             self._hold(value, challenged=True)

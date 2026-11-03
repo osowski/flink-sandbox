@@ -138,6 +138,21 @@ class StaticFilesTest(unittest.TestCase):
         self.assertIn("openMessage(target.dataset.messageId, target.dataset.to)", app_js)
         self.assertIn('const viewerName = (agent) => (agent ? agentLabel(agent) : "—");', app_js)
 
+    def test_feed_never_shows_a_question_mark_sender(self):
+        app_js = _static_text("app.js")
+        self.assertIn('NODE_LABELS[name] || name || "—"', app_js)
+        self.assertNotIn('|| "?"', app_js)
+
+    def test_late_task_rows_back_fill_the_feed_target(self):
+        app_js = _static_text("app.js")
+        self.assertIn('type === "message_target"', app_js)
+        self.assertIn("retarget(data)", app_js)
+
+    def test_audit_log_is_not_a_graph_node(self):
+        app_js = _static_text("app.js")
+        self.assertIn('const AUDIT_LOG = "audit log";', app_js)
+        self.assertIn("if (m.target !== AUDIT_LOG) drawNode(m.target);", app_js)
+
     def test_viewer_leaves_out_empty_lists(self):
         self.assertIn('v === "[]" || (Array.isArray(v) && v.length === 0)', _static_text("app.js"))
 

@@ -87,9 +87,30 @@ class FakeFeedTest(unittest.TestCase):
         self.assertEqual({m["kind"] for m in messages}, {"task", "decision", "status"})
         for m in messages:
             if m["source"] == "compliance":
-                continue
+                self.assertEqual(m["target"], "audit log")
+
+    def test_no_feed_entry_is_left_without_a_target(self):
+        for m in self.snapshot["feed"]:
             with self.subTest(message=m["message_id"]):
                 self.assertIsNotNone(m["target"])
+
+    def test_some_replies_arrive_before_their_task_and_are_back_filled(self):
+        filled = self.of("message_target")
+        self.assertTrue(filled)
+        sent = {m["message_id"]: m for m in self.of("message")}
+        for f in filled:
+            with self.subTest(message=f["message_id"]):
+                reply = sent[f["message_id"]]
+                self.assertIsNone(reply["target"])
+                self.assertEqual(reply["source"], "enrolment")
+                self.assertEqual(f["target"], "risk")
+                self.assertEqual((f["topic"], f["partition"], f["offset"]),
+                                 (reply["topic"], reply["partition"], reply["offset"]))
+
+    def test_compliance_replies_name_the_audit_log(self):
+        replies = [m for m in self.of("message") if m["source"] == "compliance"]
+        self.assertTrue(replies)
+        self.assertEqual({m["target"] for m in replies}, {"audit log"})
 
     def test_first_leg_runs_through_risk_and_the_router_only_resumes_challenges(self):
         tasks = [m for m in self.of("message") if m["kind"] == "task"]
@@ -103,7 +124,7 @@ class FakeFeedTest(unittest.TestCase):
         self.assertTrue(any((m["source"], m["target"]) == (ROUTER, "enrolment") for m in tasks))
 
     def test_enrolment_decisions_answer_risk_on_the_first_leg_and_the_router_on_the_second(self):
-        targets = {m["target"] for m in self.of("message")
+        targets = {m["target"] for m in self.snapshot["feed"]
                    if m["kind"] == "decision" and m["source"] == "enrolment"}
         self.assertEqual(targets, {"risk", ROUTER})
 

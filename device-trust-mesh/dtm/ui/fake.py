@@ -9,7 +9,8 @@ challenge, enrolment → step-up; the router resumes a challenged enrolment by s
 device answers. Compliance is sent no tasks: it observes every risk-assessment, enrolment-decision and
 step-up-challenge and answers each with an ``audit-record`` whose outcome is null. Task types, artifact names
 and artifact fields are the ones the real agents emit. The task and decision views commit independently, so
-every ``LATE_RISK_EVERY``-th conversation delivers its risk-assessment after the hand-off it led to. Nothing
+every ``LATE_RISK_EVERY``-th conversation delivers its risk-assessment after the hand-off it led to and every
+``EARLY_DECISION_EVERY``-th delivers the enrolment decision just before the task that asked for it. Nothing
 here touches Kafka or HTTP.
 """
 import heapq
@@ -54,6 +55,8 @@ _BLOCKING = {"COMPROMISED_OS": "Compromised OS fingerprint", "IMPOSSIBLE_TRAVEL"
 AUDIT_DELAY_MS = 150
 LATE_RISK_EVERY = 3
 LATE_RISK_MS = 400
+EARLY_DECISION_EVERY = 4
+EARLY_DECISION_MS = 20
 
 Action = Callable[[int], list[Delta]]
 
@@ -178,15 +181,17 @@ class FakeFeed:
                              f"Assess enrolment risk for {device_id} (customer {customer_id})")
         score = 85 if scenario in _BLOCKING else 55 if scenario == "OUTDATED_OS" else 12
         assessed_at = t + self._jitter(500)
-        late = next(self._conversations) % LATE_RISK_EVERY == 0
+        number = next(self._conversations)
+        late = number % LATE_RISK_EVERY == 0
         self._reply(assessed_at + 100 + LATE_RISK_MS if late else assessed_at, device_id, seq, corr, to_risk,
                     "risk", "risk-assessment", outcome=None, policy_action=None, risk_score=score,
                     rationale=f"{scenario} signals", signal_ids=json.dumps([] if scenario == "CLEAN" else [scenario]))
-        to_enrolment = self._task(assessed_at + 100, device_id, seq, corr, "risk", "enrolment",
-                                  "DECIDE_ENROLMENT", f"Decide enrolment for {device_id}: risk {score}")
         decide_at = t + self._jitter(1800)
         if scenario == "NEW_DEVICE_ESTABLISHED_ACCOUNT":
             decide_at += 6000
+        hand_off_at = decide_at + EARLY_DECISION_MS if number % EARLY_DECISION_EVERY == 0 else assessed_at + 100
+        to_enrolment = self._task(hand_off_at, device_id, seq, corr, "risk", "enrolment",
+                                  "DECIDE_ENROLMENT", f"Decide enrolment for {device_id}: risk {score}")
         if scenario == "OUTDATED_OS":
             self._decide(decide_at, device_id, seq, corr, to_enrolment, t, "CHALLENGED", "CHALLENGE",
                          "Outdated OS; step-up required", "CHALLENGED", "TASK_STATE_AUTH_REQUIRED")

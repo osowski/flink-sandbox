@@ -11,6 +11,7 @@
   const MAX_DOTS = 300;
   const BUBBLE_HOLD_MS = 4000;
   const ROUTER = "dtm-a2a-task-router";
+  const AUDIT_LOG = "audit log";
   const FRESHNESS_TIP = "measured at a 500 ms poll interval";
   const MATERIALIZATION_TIP = "Kafka record timestamp → applied in context-mcp; "
     + "mostly the wait for Flink's next checkpoint commit";
@@ -70,7 +71,7 @@
     return ms >= 1000 ? `~${(ms / 1000).toFixed(1)} s` : `~${Math.round(ms)} ms`;
   };
   const freshness = (ms) => (ms == null ? "—" : `≤ ${Math.round(ms)} ms`);
-  const agentLabel = (name) => NODE_LABELS[name] || name || "?";
+  const agentLabel = (name) => NODE_LABELS[name] || name || "—";
   const edgeKey = (source, target) => `${source}→${target}`;
   const messageKey = (m) => `${m.topic}|${m.partition}|${m.offset}`;
 
@@ -167,7 +168,7 @@
       if (row) row.remove();
     }
     drawNode(m.source);
-    drawNode(m.target);
+    if (m.target !== AUDIT_LOG) drawNode(m.target);
     if (m.kind === "task" && m.source && m.target) addEdge(m.source, m.target);
     return true;
   }
@@ -185,6 +186,17 @@
               el("td", {}, m.device_id),
               el("td", { class: "pos" }, `${m.topic} @ ${m.partition}:${m.offset}`));
     return tr;
+  }
+
+  // A reply can reach the page before the task that names its sender; the target follows once the task lands.
+  function retarget(update) {
+    const key = messageKey(update);
+    const m = state.feed.find((entry) => messageKey(entry) === key);
+    if (!m) return false;
+    m.target = update.target;
+    const row = feedBody.querySelector(`tr[data-key="${CSS.escape(key)}"]`);
+    if (row) row.children[1].textContent = `${agentLabel(m.source)} → ${agentLabel(m.target)}`;
+    return true;
   }
 
   function renderFeed() {
@@ -651,6 +663,8 @@
         dirty.add("devices");
       } else if (type === "message") {
         if (addMessage(data)) messages.push(data);
+      } else if (type === "message_target") {
+        if (retarget(data)) dirty.add("feed");
       } else if (type === "pairs") {
         state.pairs = data;
         for (const r of data.ranking) addEdge(r.from_agent, r.to_agent);
@@ -669,11 +683,13 @@
     if (dirty.has("summary")) renderSummary();
     if (dirty.has("pairs")) { renderPairs(); renderEdgeWeights(); }
     if (dirty.has("stale")) renderStale();
+    const refilter = dirty.has("feed") && state.filter;
     if (messages.length) {
-      prependFeed(messages);
+      if (!refilter) prependFeed(messages);
       renderEmpty();
       scheduleVisuals(messages);
     }
+    if (refilter) renderFeed();
   }
 
   const conn = $("#conn");

@@ -2,7 +2,7 @@ import json
 import unittest
 from datetime import datetime, timezone
 
-from dtm.ui.model import Board, Coord, display_status, json_safe, percentile
+from dtm.ui.model import REQUESTER_FACTOR, Board, Coord, display_status, json_safe, percentile
 
 ROUTER = "dtm-a2a-task-router"
 DECISIONS = "agent.decisions_human_readable"
@@ -255,6 +255,69 @@ class FeedTest(unittest.TestCase):
         self.assertIsNone(old["target"])
         self.assertEqual(new["target"], "a9")
 
+    def test_compliance_replies_target_the_audit_log_even_when_the_audited_decision_is_unknown(self):
+        decision_msg = payload(self.board.apply_decision(
+            decision("c-1", causation_id="never-seen", agent="compliance", artifact_name="audit-record"),
+            coord(0, DECISIONS)), "message")
+        status_msg = payload(self.board.apply_status(
+            status("c-2", causation_id="never-seen", agent="compliance"), coord(1)), "message")
+        self.assertEqual((decision_msg["source"], decision_msg["target"]), ("compliance", "audit log"))
+        self.assertEqual((status_msg["source"], status_msg["target"]), ("compliance", "audit log"))
+        self.assertEqual(self.board.message("c-1")["message"]["target"], "audit log")
+
+    def test_compliance_replies_are_not_held_for_a_later_task(self):
+        self.board.apply_decision(decision("c-1", causation_id="m-1", agent="compliance"), coord(0, DECISIONS))
+        deltas = self.board.apply_task(task("m-1", from_agent="risk"), coord(1))
+        self.assertNotIn("message_target", kinds(deltas))
+        self.assertEqual(self.board.message("c-1")["message"]["target"], "audit log")
+
+    def test_reply_before_its_task_gets_its_target_when_the_task_arrives(self):
+        reply = payload(self.board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"),
+                                                  coord(5, DECISIONS)), "message")
+        self.assertIsNone(reply["target"])
+        deltas = self.board.apply_task(task("m-1", from_agent="risk", to_agent="enrolment"), coord(6))
+        self.assertEqual(kinds(deltas), ["message", "activity", "message_target"])
+        self.assertEqual(payload(deltas, "message_target"),
+                         {"message_id": "d-1", "topic": DECISIONS, "partition": 0, "offset": 5, "target": "risk"})
+        self.assertEqual(self.board.message("d-1")["message"]["target"], "risk")
+        entry = next(m for m in self.board.snapshot()["feed"] if m["message_id"] == "d-1")
+        self.assertEqual(entry["target"], "risk")
+
+    def test_status_and_decision_waiting_on_one_task_are_both_filled(self):
+        self.board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"), coord(0, DECISIONS))
+        self.board.apply_status(status("s-1", causation_id="m-1", agent="enrolment"), coord(1))
+        deltas = self.board.apply_task(task("m-1", from_agent="risk"), coord(2))
+        self.assertEqual([p["message_id"] for k, p in deltas if k == "message_target"], ["d-1", "s-1"])
+
+    def test_a_repeated_task_fills_nothing_new(self):
+        self.board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"), coord(0, DECISIONS))
+        self.board.apply_task(task("m-1", from_agent="risk"), coord(1))
+        deltas = self.board.apply_task(task("m-1", from_agent="risk"), coord(2))
+        self.assertNotIn("message_target", kinds(deltas))
+
+    def test_a_reply_evicted_before_its_task_is_skipped(self):
+        board = Board(clock=Clock(), feed_limit=2)
+        board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"), coord(0, DECISIONS))
+        board.apply_task(task("m-2"), coord(1))
+        board.apply_task(task("m-3"), coord(2))
+        deltas = board.apply_task(task("m-1", from_agent="risk"), coord(3))
+        self.assertNotIn("message_target", kinds(deltas))
+
+    def test_a_task_without_a_sender_fills_nothing(self):
+        self.board.apply_decision(decision("d-1", causation_id="m-1", agent="enrolment"), coord(0, DECISIONS))
+        deltas = self.board.apply_task(task("m-1", from_agent=None), coord(1))
+        self.assertNotIn("message_target", kinds(deltas))
+        self.assertIsNone(self.board.message("d-1")["message"]["target"])
+
+    def test_orphan_map_is_bounded(self):
+        board = Board(clock=Clock(), feed_limit=3)
+        for i in range(20):
+            board.apply_decision(decision(f"d-{i}", causation_id=f"m-{i}", agent="enrolment"),
+                                 coord(i, DECISIONS))
+        self.assertEqual(len(board._orphans), 3 * REQUESTER_FACTOR)
+        self.assertNotIn("m-0", board._orphans)
+        newest = board.apply_task(task("m-19", from_agent="risk"), coord(20))
+        self.assertEqual([p["message_id"] for k, p in newest if k == "message_target"], ["d-19"])
 
 def bubble_of(deltas):
     """Return the activity bubble in ``deltas``, or None when the row set none."""

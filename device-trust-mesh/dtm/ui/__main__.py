@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> None:
         workers = [TopicReader.connect(board, hub.publish_threadsafe),
                    ContextPoller(board, http, hub.publish_threadsafe, context_base_url())]
 
-    app = build_app(hub, lambda: board_health(board))
+    app = build_app(hub, lambda: board_health(board), message=board.message, message_limit=board.feed_limit)
     for worker in workers:
         worker.start()
     try:

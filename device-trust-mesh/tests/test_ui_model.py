@@ -1,7 +1,8 @@
+import json
 import unittest
 from datetime import datetime, timezone
 
-from dtm.ui.model import Board, Coord, display_status, percentile
+from dtm.ui.model import Board, Coord, display_status, json_safe, percentile
 
 T0 = 1793448000000
 T0_DT = datetime.fromtimestamp(T0 / 1000, tz=timezone.utc)
@@ -249,6 +250,66 @@ class FeedTest(unittest.TestCase):
         new = payload(board.apply_decision(decision(causation_id="m-9"), coord()), "message")
         self.assertIsNone(old["target"])
         self.assertEqual(new["target"], "a9")
+
+
+class MessageStoreTest(unittest.TestCase):
+    def test_message_returns_feed_entry_and_row(self):
+        board = Board()
+        value = task("m1", device_id="dev-1")
+        board.apply_task(value, coord())
+        held = board.message("m1")
+        self.assertEqual(held["message"]["message_id"], "m1")
+        self.assertEqual(held["row"]["summary"], value["summary"])
+        self.assertEqual(held["row"]["envelope"]["event_time"], T0)
+        self.assertIsInstance(held["row"]["envelope"]["event_time"], int)
+        json.dumps(held, allow_nan=False)
+
+    def test_message_store_evicts_oldest_beyond_feed_limit(self):
+        board = Board(feed_limit=2)
+        for i in range(3):
+            board.apply_task(task(f"m{i}"), coord(i))
+        self.assertIsNone(board.message("m0"))
+        self.assertIsNotNone(board.message("m1"))
+        self.assertIsNotNone(board.message("m2"))
+
+    def test_feed_limit_is_exposed(self):
+        self.assertEqual(Board(feed_limit=7).feed_limit, 7)
+
+    def test_message_unknown_is_none(self):
+        self.assertIsNone(Board().message("nope"))
+
+    def test_decisions_and_statuses_are_held_even_when_requester_unseen(self):
+        board = Board()
+        board.apply_decision(decision("d1", causation_id="never-seen"), coord(0, "agent.decisions_human_readable"))
+        board.apply_status(status("s1", causation_id="never-seen"), coord(1, "agent.task-status_human_readable"))
+        self.assertIsNone(board.message("d1")["message"]["target"])
+        self.assertEqual(board.message("d1")["row"]["outcome"], "GRANTED")
+        self.assertEqual(board.message("s1")["row"]["state"], "TASK_STATE_COMPLETED")
+        self.assertEqual(board.message("s1")["message"]["kind"], "status")
+
+    def test_row_is_a_copy_of_the_applied_value(self):
+        board = Board()
+        value = task("m1")
+        board.apply_task(value, coord())
+        value["summary"] = "mutated"
+        board.message("m1")["row"]["summary"] = "also mutated"
+        self.assertEqual(board.message("m1")["row"]["summary"], "s")
+
+    def test_redelivered_message_id_keeps_one_row(self):
+        board = Board(feed_limit=2)
+        board.apply_task(task("m1"), coord(0))
+        board.apply_task(task("m2"), coord(1))
+        board.apply_task(task("m1"), coord(2))
+        board.apply_task(task("m3"), coord(3))
+        self.assertIsNone(board.message("m2"))
+        self.assertEqual(board.message("m1")["message"]["offset"], 2)
+
+
+class JsonSafeTest(unittest.TestCase):
+    def test_converts_datetimes_and_recurses(self):
+        out = json_safe({"a": T0_DT, "b": [T0_DT, (1, None)], "c": {"d": "x", "e": 1.5, "f": True}})
+        self.assertEqual(out, {"a": T0, "b": [T0, [1, None]], "c": {"d": "x", "e": 1.5, "f": True}})
+        json.dumps(out, allow_nan=False)
 
 
 class PairsTest(unittest.TestCase):

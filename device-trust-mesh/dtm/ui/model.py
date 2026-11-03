@@ -10,6 +10,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 from dtm.common.envelope import to_epoch_ms
@@ -64,6 +65,17 @@ def percentile(values: list[float], q: float) -> float | None:
     return ordered[min(rank, len(ordered)) - 1]
 
 
+def json_safe(value):
+    """Return ``value`` as strict-JSON data: datetimes become epoch ms and tuples become lists."""
+    if isinstance(value, datetime):
+        return to_epoch_ms(value)
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
+
+
 def _reason(value: dict) -> str | None:
     head = " · ".join(p for p in (value.get("outcome"), value.get("policy_action")) if p)
     rationale = (value.get("rationale") or "")[:RATIONALE_CHARS]
@@ -86,12 +98,18 @@ class Board:
         self._latency: OrderedDict[str, dict] = OrderedDict()
         self._feed: deque[dict] = deque(maxlen=feed_limit)
         self._requesters: OrderedDict[str, str | None] = OrderedDict()
+        self._rows: OrderedDict[str, dict] = OrderedDict()
         self._pair_windows: dict[int, dict[tuple[str, str], tuple[int, int]]] = {}
         self._decision_window: list[tuple[int, float]] = []
         self._freshness_window: list[tuple[int, float]] = []
         self._context_lag: tuple[float | None, float | None] = (None, None)
         self._context_lag_over: tuple[bool, bool] = (False, False)
         self._stale: dict[str, int | None] = dict.fromkeys(STALE_SOURCES)
+
+    @property
+    def feed_limit(self) -> int:
+        """How many recent messages, and so message rows, the board holds."""
+        return self._feed_limit
 
     def apply_devices(self, rows: list[dict], polled_at_ms: int) -> list[Delta]:
         """Fold in a ``/v1/devices`` poll.
@@ -212,6 +230,12 @@ class Board:
                     "feed": [dict(m) for m in reversed(self._feed)],
                     "pairs": self._pairs(), "summary": self._summary(), "stale": dict(self._stale)}
 
+    def message(self, message_id: str) -> dict | None:
+        """Return ``{"message": feed entry, "row": row as applied}`` for a held message id, else None."""
+        with self._lock:
+            held = self._rows.get(message_id)
+            return None if held is None else {"message": dict(held["message"]), "row": json_safe(held["row"])}
+
     def _apply_device_row(self, row: dict, polled_at_ms: int) -> dict | None:
         device_id = row["device_id"]
         seq = row["context_seq"]
@@ -257,6 +281,10 @@ class Board:
                    "message_id": message_id, "topic": coord.topic, "partition": coord.partition,
                    "offset": coord.offset}
         self._feed.append(message)
+        self._rows[message_id] = {"message": message, "row": json_safe(value)}
+        self._rows.move_to_end(message_id)
+        while len(self._rows) > self._feed_limit:
+            self._rows.popitem(last=False)
         return "message", dict(message)
 
     def _observe(self, window: list, at_ms: int, value: float) -> None:

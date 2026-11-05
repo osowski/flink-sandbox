@@ -20,7 +20,7 @@ import httpx
 from confluent_kafka import KafkaError, TopicPartition
 from prometheus_client.parser import text_string_to_metric_families
 
-from dtm.common.kafka import bootstrap_servers, consumer_config, schema_registry_url
+from dtm.common.kafka import bootstrap_servers, consumer_config, schema_registry_client
 from dtm.ui.model import Board, Coord, Delta
 
 UI_TOPICS = ("agent.tasks_human_readable", "agent.decisions_human_readable",
@@ -112,11 +112,10 @@ class TopicReader(_Worker):
     @classmethod
     def connect(cls, board: Board, publish: Publish) -> "TopicReader":
         from confluent_kafka import Consumer
-        from confluent_kafka.schema_registry import SchemaRegistryClient
         from confluent_kafka.schema_registry.avro import AvroDeserializer
         from confluent_kafka.serialization import MessageField, SerializationContext
 
-        avro = AvroDeserializer(SchemaRegistryClient({"url": schema_registry_url()}))
+        avro = AvroDeserializer(schema_registry_client())
 
         def deserialize(topic: str, raw: bytes | None) -> dict | None:
             return avro(raw, SerializationContext(topic, MessageField.VALUE))

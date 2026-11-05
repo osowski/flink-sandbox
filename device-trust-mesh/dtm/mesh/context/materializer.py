@@ -15,7 +15,7 @@ from typing import Callable
 import confluent_kafka
 from confluent_kafka import TopicPartition
 
-from dtm.common.kafka import bootstrap_servers, consumer_config, schema_registry_url
+from dtm.common.kafka import bootstrap_servers, consumer_config, schema_registry_client
 from dtm.common.metrics import MATERIALIZATION_LAG_MS, MATERIALIZER_SKIPPED
 from dtm.mesh.context.table import ContextTable
 
@@ -54,11 +54,10 @@ class Materializer:
     @classmethod
     def connect(cls, table: ContextTable) -> "Materializer":
         from confluent_kafka import Consumer
-        from confluent_kafka.schema_registry import SchemaRegistryClient
         from confluent_kafka.schema_registry.avro import AvroDeserializer
         from confluent_kafka.serialization import MessageField, SerializationContext
 
-        avro = AvroDeserializer(SchemaRegistryClient({"url": schema_registry_url()}))
+        avro = AvroDeserializer(schema_registry_client())
 
         def deserialize_key(topic: str, raw: bytes | None) -> dict | None:
             if topic not in _KEYED_TOPICS:

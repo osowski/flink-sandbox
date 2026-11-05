@@ -14,7 +14,7 @@ from confluent_kafka import OFFSET_BEGINNING, OFFSET_END, KafkaException, TopicP
 
 from dtm.common.a2a import CARDS_TOPIC, REPLY_TOPIC, dumps, task_topic, validate
 from dtm.common.envelope import ENVELOPE_URI
-from dtm.common.kafka import bootstrap_servers, consumer_config, producer_config, schema_registry_url
+from dtm.common.kafka import bootstrap_servers, consumer_config, producer_config, schema_registry_client
 from dtm.common.metrics import HOP_LATENCY_MS
 
 log = logging.getLogger(__name__)
@@ -163,11 +163,10 @@ class AgentBus:
     @classmethod
     def connect(cls, agent: str, config: BusConfig) -> "AgentBus":
         from confluent_kafka import Consumer, Producer
-        from confluent_kafka.schema_registry import SchemaRegistryClient
         from confluent_kafka.schema_registry.avro import AvroSerializer
         from confluent_kafka.serialization import MessageField, SerializationContext
 
-        registry = SchemaRegistryClient({"url": schema_registry_url()})
+        registry = schema_registry_client()
         serializers: dict[str, AvroSerializer] = {}
 
         def avro_serialize(topic: str, value: dict) -> bytes:

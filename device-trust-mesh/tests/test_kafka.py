@@ -1,7 +1,17 @@
+import pathlib
 import unittest
 from unittest import mock
 
-from dtm.common.kafka import consumer_config, oauth_settings, producer_config, security_config
+import dtm
+from dtm.common.kafka import (
+    consumer_config,
+    oauth_settings,
+    producer_config,
+    schema_registry_client,
+    schema_registry_conf,
+    schema_registry_url,
+    security_config,
+)
 
 OAUTH_ENV = {
     "KAFKA_SECURITY_PROTOCOL": "SASL_PLAINTEXT",
@@ -74,6 +84,46 @@ class KafkaSecurityTest(unittest.TestCase):
         with env(KAFKA_SASL_MECHANISM="PLAIN"):
             with self.assertRaisesRegex(ValueError, "OAUTHBEARER"):
                 security_config()
+
+
+class SchemaRegistryConfTest(unittest.TestCase):
+    def test_anonymous_conf_is_just_the_url(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(schema_registry_conf(), {"url": schema_registry_url()})
+
+    def test_oauth_conf_reuses_the_kafka_client_and_token_endpoint(self):
+        with env(KAFKA_OAUTH_SCOPE="profile email"):
+            conf = schema_registry_conf()
+        self.assertEqual(conf["url"], schema_registry_url())
+        self.assertEqual(conf["bearer.auth.credentials.source"], "OAUTHBEARER")
+        self.assertEqual(conf["bearer.auth.client.id"], "sa-dtm-ray")
+        self.assertEqual(conf["bearer.auth.client.secret"], "s3cret")
+        self.assertEqual(conf["bearer.auth.issuer.endpoint.url"], OAUTH_ENV["KAFKA_OAUTH_TOKEN_ENDPOINT_URL"])
+        self.assertEqual(conf["bearer.auth.scope"], "profile email")
+        self.assertTrue(conf["bearer.auth.logical.cluster"])
+
+    def test_oauth_conf_without_scope_sends_the_empty_scope_the_library_requires(self):
+        with env():
+            self.assertEqual(schema_registry_conf()["bearer.auth.scope"], "")
+
+    def test_partial_oauth_env_raises(self):
+        with mock.patch.dict("os.environ", {"KAFKA_OAUTH_CLIENT_ID": "x"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "KAFKA_SECURITY_PROTOCOL"):
+                schema_registry_conf()
+
+    def test_client_builds_with_oauth_conf_without_network(self):
+        with env():
+            client = schema_registry_client()
+        self.assertEqual(client._rest_client.base_urls, [schema_registry_url()])
+
+    def test_client_builds_anonymously(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertIsNotNone(schema_registry_client())
+
+    def test_no_inline_client_constructions_remain(self):
+        offenders = [str(path) for path in pathlib.Path(dtm.__file__).parent.rglob("*.py")
+                     if 'SchemaRegistryClient({"url"' in path.read_text()]
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

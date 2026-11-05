@@ -5,7 +5,7 @@ import time
 import uuid
 
 from dtm.common.envelope import Envelope
-from dtm.common.kafka import bootstrap_servers, producer_config, schema_registry_url
+from dtm.common.kafka import bootstrap_servers, producer_config, schema_registry_client
 from dtm.simulator.engine import MAX_INJECT_COUNT, SCENARIOS, rate_problem
 
 CONTROL_TOPIC = "simulator.control"
@@ -77,11 +77,10 @@ def parse(argv: list[str]) -> tuple[str | None, str | None, float | None, int | 
 
 def _send(record: dict, key: str) -> None:
     from confluent_kafka import Producer
-    from confluent_kafka.schema_registry import SchemaRegistryClient
     from confluent_kafka.schema_registry.avro import AvroSerializer
     from confluent_kafka.serialization import MessageField, SerializationContext
 
-    serializer = AvroSerializer(SchemaRegistryClient({"url": schema_registry_url()}), schema_str=None,
+    serializer = AvroSerializer(schema_registry_client(), schema_str=None,
                                 conf={"auto.register.schemas": False, "use.latest.version": True})
     failures: list = []
 

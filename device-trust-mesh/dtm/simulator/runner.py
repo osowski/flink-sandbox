@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from confluent_kafka import KafkaException
 from confluent_kafka.serialization import MessageField, SerializationContext, SerializationError
 
-from dtm.common.kafka import bootstrap_servers, consumer_config, producer_config, schema_registry_url
+from dtm.common.kafka import bootstrap_servers, consumer_config, producer_config, schema_registry_client
 from dtm.simulator.engine import DEFAULT_RATE, Simulator, rate_problem
 from dtm.simulator.pool import DevicePool
 
@@ -74,12 +74,11 @@ def simulator_from_env(env: Mapping[str, str]) -> Simulator:
 def run(env: Mapping[str, str]) -> None:
     """Run the simulator until SIGINT or SIGTERM; ``simulator_from_env`` reads the settings."""
     from confluent_kafka import Consumer, Producer
-    from confluent_kafka.schema_registry import SchemaRegistryClient
     from confluent_kafka.schema_registry.avro import AvroDeserializer, AvroSerializer
 
     simulator = simulator_from_env(env)
 
-    registry = SchemaRegistryClient({"url": schema_registry_url()})
+    registry = schema_registry_client()
     serializer = AvroSerializer(registry, schema_str=None,
                                 conf={"auto.register.schemas": False, "use.latest.version": True})
     deserializer = AvroDeserializer(registry)

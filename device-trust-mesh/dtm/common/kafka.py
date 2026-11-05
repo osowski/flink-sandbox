@@ -75,6 +75,33 @@ def security_config() -> dict:
     return config
 
 
+# The client library requires these Confluent Cloud routing fields; Confluent Platform Schema Registry ignores them.
+_SR_LOGICAL_CLUSTER = "confluent-platform"
+
+
+def schema_registry_conf() -> dict:
+    """Return Schema Registry client settings; OAuth reuses the Kafka client and token endpoint when configured."""
+    conf = {"url": schema_registry_url()}
+    settings = oauth_settings()
+    if settings is None:
+        return conf
+    return {
+        **conf,
+        "bearer.auth.credentials.source": "OAUTHBEARER",
+        "bearer.auth.client.id": settings.client_id,
+        "bearer.auth.client.secret": settings.client_secret,
+        "bearer.auth.issuer.endpoint.url": settings.token_endpoint_url,
+        "bearer.auth.scope": settings.scope or "",
+        "bearer.auth.logical.cluster": _SR_LOGICAL_CLUSTER,
+    }
+
+
+def schema_registry_client():
+    from confluent_kafka.schema_registry import SchemaRegistryClient
+
+    return SchemaRegistryClient(schema_registry_conf())
+
+
 def producer_config(bootstrap: str) -> dict:
     return {
         "bootstrap.servers": bootstrap,

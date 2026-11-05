@@ -134,18 +134,18 @@ In a larger deployment, a Confluent REST Proxy, deployed through CFK's KafkaRest
 
 ## Authentication
 
-Every Kafka and Schema Registry client in the mesh (the simulator, `dtm-ctl`, the UI, the agent runtime and the context materializer) takes its connection settings from `dtm/common/kafka.py`. With none of the variables below set, clients connect anonymously. With any of the five required ones set, Kafka clients authenticate with SASL/OAUTHBEARER, fetching a token from the OIDC token endpoint with the client credentials grant.
+Every Kafka and Schema Registry client in the mesh (the simulator, `dtm-ctl`, the UI, the agent runtime and the context materializer) takes its connection settings from `dtm/common/kafka.py`. With none of the variables below set, clients connect anonymously. With all five required ones set, Kafka clients authenticate with SASL/OAUTHBEARER, fetching a token from the OIDC token endpoint with the client credentials grant.
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `KAFKA_SECURITY_PROTOCOL` | yes | librdkafka `security.protocol`, for example `SASL_SSL` |
+| `KAFKA_SECURITY_PROTOCOL` | yes | librdkafka `security.protocol`; must be `SASL_PLAINTEXT` or `SASL_SSL`, for example `SASL_PLAINTEXT` |
 | `KAFKA_SASL_MECHANISM` | yes | Must be `OAUTHBEARER` |
 | `KAFKA_OAUTH_TOKEN_ENDPOINT_URL` | yes | OIDC token endpoint |
 | `KAFKA_OAUTH_CLIENT_ID` | yes | Client id |
 | `KAFKA_OAUTH_CLIENT_SECRET` | yes | Client secret; supply it from a Kubernetes Secret, never in a manifest or image |
 | `KAFKA_OAUTH_SCOPE` | no | OAuth scope; omitted from the request when unset |
 
-Setting only some of the five required variables, or a mechanism other than `OAUTHBEARER`, raises a `ValueError` naming the problem when the first client is constructed. Empty values count as unset.
+Setting only some of the five required variables, a mechanism other than `OAUTHBEARER`, or a protocol other than `SASL_PLAINTEXT` or `SASL_SSL` raises a `ValueError` naming the problem when the first client is constructed. Empty values count as unset.
 
 Schema Registry follows Kafka. When Kafka OAuth is configured, every Schema Registry client uses bearer auth with the same client id, client secret, scope and token endpoint, so one set of variables covers both. The Confluent Cloud routing field `bearer.auth.logical.cluster` is sent as the placeholder `confluent-platform`, which Confluent Platform Schema Registry ignores.
 

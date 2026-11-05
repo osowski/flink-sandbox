@@ -1,6 +1,6 @@
 """Kafka client settings and endpoints shared by every producer and consumer in the mesh."""
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 _DEFAULT_BOOTSTRAP = "kafka.kafka.svc.cluster.local:9071"
 _DEFAULT_SCHEMA_REGISTRY = "http://schemaregistry.kafka.svc.cluster.local:8081"
@@ -23,10 +23,13 @@ _OAUTH_VARS = (
 )
 
 
+_SASL_PROTOCOLS = ("SASL_PLAINTEXT", "SASL_SSL")
+
+
 @dataclass(frozen=True)
 class OAuthSettings:
     client_id: str
-    client_secret: str
+    client_secret: str = field(repr=False)
     token_endpoint_url: str
     scope: str | None
 
@@ -41,6 +44,11 @@ def _oauth_env() -> dict[str, str] | None:
         raise ValueError(f"Kafka OAuth is partially configured; missing {', '.join(missing)}")
     if values["KAFKA_SASL_MECHANISM"] != "OAUTHBEARER":
         raise ValueError(f"KAFKA_SASL_MECHANISM must be OAUTHBEARER, got {values['KAFKA_SASL_MECHANISM']!r}")
+    if values["KAFKA_SECURITY_PROTOCOL"] not in _SASL_PROTOCOLS:
+        raise ValueError(
+            f"KAFKA_SECURITY_PROTOCOL must be one of {', '.join(_SASL_PROTOCOLS)}, "
+            f"got {values['KAFKA_SECURITY_PROTOCOL']!r}"
+        )
     return values
 
 
@@ -75,7 +83,7 @@ def security_config() -> dict:
     return config
 
 
-# The client library requires these Confluent Cloud routing fields; Confluent Platform Schema Registry ignores them.
+# The client library requires this Confluent Cloud routing field; Confluent Platform Schema Registry ignores it.
 _SR_LOGICAL_CLUSTER = "confluent-platform"
 
 

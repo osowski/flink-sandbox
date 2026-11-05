@@ -85,6 +85,22 @@ class KafkaSecurityTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "OAUTHBEARER"):
                 security_config()
 
+    def test_non_sasl_protocol_raises(self):
+        with env(KAFKA_SECURITY_PROTOCOL="PLAINTEXT"):
+            with self.assertRaisesRegex(ValueError, "KAFKA_SECURITY_PROTOCOL.*SASL_PLAINTEXT.*SASL_SSL") as ctx:
+                security_config()
+            self.assertNotIn(OAUTH_ENV["KAFKA_OAUTH_CLIENT_SECRET"], str(ctx.exception))
+            with self.assertRaisesRegex(ValueError, "KAFKA_SECURITY_PROTOCOL"):
+                oauth_settings()
+
+    def test_sasl_ssl_protocol_is_accepted(self):
+        with env(KAFKA_SECURITY_PROTOCOL="SASL_SSL"):
+            self.assertEqual(security_config()["security.protocol"], "SASL_SSL")
+
+    def test_secret_is_kept_out_of_repr(self):
+        with env():
+            self.assertNotIn(OAUTH_ENV["KAFKA_OAUTH_CLIENT_SECRET"], repr(oauth_settings()))
+
 
 class SchemaRegistryConfTest(unittest.TestCase):
     def test_anonymous_conf_is_just_the_url(self):

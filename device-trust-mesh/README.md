@@ -70,6 +70,13 @@ The packaged prompts in `dtm/prompts/` are the defaults. A `promptRef` resolves 
 
 An agent consumes its own `agent.tasks.<name>` topic and its card advertises that topic. An observer of `agent.task-events`, such as Compliance, passes `topics=["agent.task-events"]` and `request_topic=None` to `AgentRuntime`; its card lists no interfaces.
 
+## Metrics
+
+`dtm/common/metrics.py` defines the mesh's `dtm_*` metrics: hop, processing, LLM and context-tool latency, materialization lag, STALE lookups, errors and tracked devices. Each one records twice:
+
+- In the `prometheus_client` registry, served at each Serve app's `/metrics` route. Through the Serve proxy that route reaches one replica, so read it only for a single replica; the UI's materialization-lag summary reads context-mcp's.
+- In `ray.util.metrics`. Ray's metrics agent on each node (`--metrics-export-port`, 8080 on KubeRay) exports every replica's series as `ray_dtm_*` with a `WorkerId` label; scrape that port and aggregate across workers. Ray estimates a histogram's `_sum` from bucket midpoints, so use its buckets, not averages. Outside a Ray worker, and in the simulator and UI images (no Ray), this side records nothing.
+
 ## Simulator
 
 `python -m dtm.simulator` runs the device simulator. It produces `ENROL_REQUESTED` and `UNENROL_REQUESTED` events to `device.events`, keyed by `device_id`, and closes the loop: it consumes `device.policy-commands` and answers every `CHALLENGE` command (once, echoing the enrolment's `correlation_id` and `enrolment_task_id`) with `CHALLENGE_PASSED` or `CHALLENGE_FAILED` after 2 s. A `CHALLENGE` command without an `enrolment_task_id` is not answered, because the router drops such an answer. Presenter commands arrive on `simulator.control`.

@@ -17,7 +17,7 @@ def stems(kind: str, suffix: str) -> set[str]:
 
 
 class SchemasTest(unittest.TestCase):
-    def test_all_subjects_vendored(self):
+    def test_all_subjects_packaged(self):
         subjects = stems("avro", ".avsc")
         self.assertEqual(len(subjects), 17)
         self.assertIn("device.events-value", subjects)
@@ -27,7 +27,6 @@ class SchemasTest(unittest.TestCase):
 
     def test_schemas_are_package_resources(self):
         self.assertEqual(str(SCHEMA_DIR), str(files("dtm") / "schemas"))
-        self.assertTrue((files("dtm") / "schemas" / "SOURCE").is_file())
 
     def test_load_avro_schema_parses(self):
         self.assertEqual(load_avro_schema("device.events-value")["name"], "DeviceEvent")

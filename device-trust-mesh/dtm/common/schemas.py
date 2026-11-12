@@ -1,4 +1,4 @@
-"""Loaders for the vendored Avro subjects and A2A JSON Schemas, shipped as package data under ``dtm/schemas``."""
+"""Loaders for the generated Avro subjects and A2A JSON Schemas, shipped as package data under ``dtm/schemas``."""
 import json
 from functools import lru_cache
 from importlib.resources import files
@@ -9,7 +9,7 @@ SCHEMA_DIR = files("dtm") / "schemas"
 
 
 class UnknownSchema(KeyError):
-    """Raised when no vendored schema exists for the requested name."""
+    """Raised when no packaged schema exists for the requested name."""
 
 
 def _load(kind: str, suffix: str, name: str) -> dict:

@@ -1,7 +1,7 @@
 """A2A v1.0 records for the mesh Kafka binding: builders, validation, and wire serialization.
 
 Records are plain dicts in the A2A JSON (protojson, camelCase) form. They are validated against the
-vendored JSON Schemas and the a2a-sdk protobuf types, and serialized directly from the dict the caller
+packaged JSON Schemas and the a2a-sdk protobuf types, and serialized directly from the dict the caller
 built; a protobuf round trip would turn integers into floats.
 """
 import copy

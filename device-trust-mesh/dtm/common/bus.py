@@ -1,6 +1,6 @@
 """AgentBus: the agents' only Kafka access, speaking the A2A v1.0 Kafka binding.
 
-A2A records are validated against the vendored schemas and written as the caller's own JSON, so
+A2A records are validated against the packaged schemas and written as the caller's own JSON, so
 integers stay integers. Avro records go through an injected serializer. Every topic name an agent
 uses is logical; the configured prefix is applied only when talking to Kafka.
 """

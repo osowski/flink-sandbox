@@ -2,18 +2,18 @@
 
 Source for the **Agentic Device Trust Mesh** demo: a device simulator, a live UI, an RTCE-style context server (`context-mcp`) and A2A agents that run on Ray Serve (KubeRay) against Confluent Platform and CP Flink.
 
-The GitOps side (topics, schemas, Flink statements, KubeRay, the `RayService` manifest) lives in [osowski/confluent-platform-gitops](https://github.com/osowski/confluent-platform-gitops), under `workloads/device-trust-mesh/`. Its README is the use-case doc: architecture, the A2A-over-Kafka binding, the topic catalogue and runtime configuration. Work is tracked in [Epic #441](https://github.com/osowski/confluent-platform-gitops/issues/441).
+The GitOps side (topics, Schema CRs, Flink statements, KubeRay, the `RayService` manifest) lives in [osowski/confluent-platform-gitops](https://github.com/osowski/confluent-platform-gitops), under `workloads/device-trust-mesh/`. Its README is the use-case doc: architecture, the A2A-over-Kafka binding, the topic catalogue and runtime configuration. Work is tracked in [Epic #441](https://github.com/osowski/confluent-platform-gitops/issues/441).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `dtm/common/` | `envelope` (mesh envelope), `ids` (deterministic ids), `a2a` (A2A v1.0 record builders and validation), `bus` (`AgentBus`, the agents' only Kafka access: A2A Kafka binding, consume allow-list, replay knobs), `kafka` (client settings), `metrics` and `schemas` (vendored schema loaders) |
+| `dtm/common/` | `envelope` (mesh envelope), `ids` (deterministic ids), `a2a` (A2A v1.0 record builders and validation), `bus` (`AgentBus`, the agents' only Kafka access: A2A Kafka binding, consume allow-list, replay knobs), `kafka` (client settings), `metrics` and `schemas` (packaged schema loaders) |
 | `dtm/simulator/` | Device simulator: device pool bounded by `DEVICE_CAP`, risk scenarios, closed loop on `device.policy-commands` |
 | `dtm/mesh/` | Ray Serve application: `runtime` (`AgentRuntime`: poll loop, hot reload, Agent Card lifecycle), `llm` (`LLMProvider`: Ollama, recorded replay, llm-interactions records), `context/` (context table, materializer, MCP tools and REST mirror), `context_mcp` (the `dtm.mesh.context_mcp:app` Serve entry point), `agents/` (the five agents, their shared `kit` and the `AgentHost` Serve wrapper) and one Serve entry point per agent |
 | `dtm/ui/` | UI service: an in-memory board fed from Kafka and `context-mcp`, a Server-Sent Events stream and the static page it serves |
 | `dtm/prompts/` | Packaged default prompts: `risk.v1`, `enrolment.v1`, `revocation.v1` |
-| `dtm/schemas/` | Vendored copy of the GitOps repo's generated Avro and A2A JSON Schemas (`SOURCE` records the commit), shipped as package data; `scripts/sync_schemas.py` refreshes it |
+| `dtm/schemas/` | The registered Avro subjects and A2A JSON Schemas, generated from `schemas/` by `scripts/generate_schemas.py` and shipped as package data |
 | `tests/` | Unit tests |
 
 Agents read business data (device and customer context, risk signals) **only** through `context-mcp`. They use Kafka directly only for A2A agent-to-agent traffic.
@@ -192,11 +192,18 @@ uv venv -p 3.12 .venv && uv pip install -p .venv -e '.[serve]'
 
 The same data is mirrored over REST, next to the MCP endpoint: `GET /v1/devices/{device_id}?min_seq=`, `GET /v1/devices?customer_id=&trust_status=`, `GET /v1/customers/{customer_id}`, `GET /v1/devices/{device_id}/signals?limit=`, `GET /healthz` (503 until the materializer has caught up) and `GET /metrics`. Agents call the tools through `dtm.common.context_client.ContextClient`, which retries a `STALE` lookup. The MCP endpoint accepts loopback and `device-trust-mesh-serve-svc` Host headers; `DTM_CONTEXT_ALLOWED_HOSTS` adds more (comma-separated host names).
 
-Refresh the vendored schemas in `dtm/schemas/` from a GitOps checkout, or verify they are current:
+## Schemas
+
+This project is the source of truth for the mesh's Schema Registry schemas. Edit the sources, never the generated files:
+
+- `schemas/src/avro/` holds the Avro records. The shared `Envelope` record is inlined into each value schema.
+- `schemas/src/a2a/` holds the mesh payloads. Each A2A topic's JSON Schema (draft 2020-12) narrows the A2A v1.0.1 bundle in `schemas/upstream/` to the mesh's Kafka binding. The generator rejects that bundle if its SHA-256 changes.
+
+`scripts/generate_schemas.py` (Python standard library only) writes the registered schemas to `dtm/schemas/{avro,a2a}/`:
 
 ```bash
-python3 scripts/sync_schemas.py <gitops-checkout>
-python3 scripts/sync_schemas.py <gitops-checkout> --check
+python3 -I scripts/generate_schemas.py           # regenerate dtm/schemas/
+python3 -I scripts/generate_schemas.py --check   # exit 1 and list drifted files
 ```
 
 ## Model benchmark

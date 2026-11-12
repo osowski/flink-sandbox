@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "generate_schemas.py"
 
 
@@ -143,6 +145,41 @@ class GeneratorTest(unittest.TestCase):
                 code = gen.main(["--check", "--out-dir", str(out)])
             self.assertEqual(code, 1)
             self.assertIn("device.events-value.avsc", stdout.getvalue())
+
+    def test_kustomization_has_one_configmap_per_schema(self):
+        doc = yaml.safe_load(gen.render_all(self.outputs)["kustomization.yaml"])
+        self.assertEqual(doc["kind"], "Kustomization")
+        self.assertEqual(doc["generatorOptions"], {"disableNameSuffixHash": True})
+        entries = doc["configMapGenerator"]
+        self.assertEqual(len(entries), 23)
+        self.assertEqual(sorted(f"schema={rel}" for rel in self.outputs),
+                         sorted(e["files"][0] for e in entries))
+        for entry in entries:
+            with self.subTest(name=entry["name"]):
+                self.assertEqual(entry["namespace"], "device-trust-mesh")
+                self.assertEqual(len(entry["files"]), 1)
+
+    def test_configmap_names_follow_subjects(self):
+        doc = yaml.safe_load(gen.render_all(self.outputs)["kustomization.yaml"])
+        names = {e["files"][0].removeprefix("schema="): e["name"] for e in doc["configMapGenerator"]}
+        self.assertEqual(names["avro/device.events-value.avsc"], "dtm-schema-device-events-value")
+        self.assertEqual(names["avro/agent.tasks_human_readable-value.avsc"],
+                         "dtm-schema-agent-tasks-human-readable-value")
+        self.assertEqual(names["avro/device.context-key.avsc"], "dtm-schema-device-context-key")
+        self.assertEqual(names["a2a/agent.tasks.risk.json"], "dtm-schema-agent-tasks-risk-a2a")
+
+    def test_check_detects_stale_kustomization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            gen.write_outputs(out, self.outputs)
+            kustomization = out / "kustomization.yaml"
+            self.assertTrue(kustomization.is_file())
+            kustomization.write_text(kustomization.read_text().replace("  - name: dtm-schema-audit-log-value\n", "", 1))
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = gen.main(["--check", "--out-dir", str(out)])
+            self.assertEqual(code, 1)
+            self.assertIn("kustomization.yaml", stdout.getvalue())
 
 
 if __name__ == "__main__":

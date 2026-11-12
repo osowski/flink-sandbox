@@ -199,7 +199,7 @@ This project is the source of truth for the mesh's Schema Registry schemas. Edit
 - `schemas/src/avro/` holds the Avro records. The shared `Envelope` record is inlined into each value schema.
 - `schemas/src/a2a/` holds the mesh payloads. Each A2A topic's JSON Schema (draft 2020-12) narrows the A2A v1.0.1 bundle in `schemas/upstream/` to the mesh's Kafka binding. The generator rejects that bundle if its SHA-256 changes.
 
-`scripts/generate_schemas.py` (Python standard library only) writes the registered schemas to `dtm/schemas/{avro,a2a}/`:
+`scripts/generate_schemas.py` (Python standard library only) writes the registered schemas to `dtm/schemas/{avro,a2a}/`. It also writes `dtm/schemas/kustomization.yaml`, which publishes each schema as a ConfigMap named `dtm-schema-<subject>` (`.` and `_` become `-`) in the `device-trust-mesh` namespace. The GitOps repo references that directory as a Kustomize remote base, pinned to a release commit, and owns the Schema CRs that point at the ConfigMaps. A new subject therefore also needs a Schema CR there.
 
 ```bash
 python3 -I scripts/generate_schemas.py           # regenerate dtm/schemas/

@@ -1,6 +1,7 @@
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
@@ -29,6 +30,14 @@ class WheelTest(unittest.TestCase):
         for name in PACKAGED:
             with self.subTest(name=name):
                 self.assertIn(name, names)
+
+
+class DependenciesTest(unittest.TestCase):
+    def test_context_runtime_dependencies_are_direct(self):
+        with open(PROJECT / "pyproject.toml", "rb") as f:
+            dependencies = tomllib.load(f)["project"]["dependencies"]
+        self.assertIn("fastapi==0.133.0", dependencies)
+        self.assertIn("uvicorn==0.54.0", dependencies)
 
 
 if __name__ == "__main__":

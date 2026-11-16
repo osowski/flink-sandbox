@@ -151,6 +151,37 @@ class ContextServerTest(unittest.IsolatedAsyncioTestCase):
             state.materializer.ready.set()
             self.assertEqual((await h.get("/healthz")).status_code, 200)
 
+    async def test_livez_ok_while_materializer_thread_alive(self):
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait)
+        thread.start()
+        try:
+            state = ContextState(seeded_table(), None, 2000, materializer_thread=thread)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(build_api(state)),
+                                         base_url="http://127.0.0.1") as h:
+                r = await h.get("/livez")
+            self.assertEqual((r.status_code, r.json()), (200, {"alive": True}))
+        finally:
+            stop.set()
+            thread.join()
+
+    async def test_livez_fails_when_materializer_thread_dead(self):
+        thread = threading.Thread(target=lambda: None)
+        thread.start()
+        thread.join()
+        state = ContextState(seeded_table(), None, 2000, materializer_thread=thread)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(build_api(state)),
+                                     base_url="http://127.0.0.1") as h:
+            r = await h.get("/livez")
+        self.assertEqual((r.status_code, r.json()), (500, {"alive": False}))
+
+    async def test_livez_ok_without_materializer(self):
+        state = ContextState(seeded_table(), None, 2000)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(build_api(state)),
+                                     base_url="http://127.0.0.1") as h:
+            r = await h.get("/livez")
+        self.assertEqual((r.status_code, r.json()), (200, {"alive": True}))
+
     async def test_mcp_mounted_in_api(self):
         app = api_for()
         async with app.router.lifespan_context(app):

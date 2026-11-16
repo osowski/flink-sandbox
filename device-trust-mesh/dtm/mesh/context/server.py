@@ -156,6 +156,15 @@ def build_api(state: ContextState) -> FastAPI:
         response.status_code = 200 if ready else 503
         return {"ready": ready}
 
+    @api.get("/livez")
+    async def livez(response: Response):
+        try:
+            state.check_alive()
+        except RuntimeError:
+            response.status_code = 500
+            return {"alive": False}
+        return {"alive": True}
+
     @api.get("/metrics")
     async def metrics():
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

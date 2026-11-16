@@ -163,17 +163,18 @@ Schema Registry follows Kafka. When Kafka OAuth is configured, every Schema Regi
 | `quay.io/osowski/device-trust-mesh-simulator` | `Dockerfile.simulator` | `python:3.12.16-slim` | `python -m dtm.simulator` (non-root) |
 | `quay.io/osowski/device-trust-mesh-ray` | `Dockerfile.ray` | `rayproject/ray:2.59.0-py312-cpu` | The RayService head and workers; Serve imports `dtm.mesh.*:app` |
 | `quay.io/osowski/device-trust-mesh-ui` | `Dockerfile.ui` | `python:3.12.16-slim` | `python -m dtm.ui` on port 8080 (non-root) |
+| `quay.io/osowski/device-trust-mesh-context` | `Dockerfile.context` | `python:3.12.16-slim` | `python -m dtm.mesh.context` on port 8080 (non-root) |
 
-The [`device-trust-mesh-build-images.yml`](../.github/workflows/device-trust-mesh-build-images.yml) workflow builds all three for `linux/amd64` and `linux/arm64`. Pull requests build without pushing; pushes to `main`, `device-trust-mesh-v*` tags and manual runs push to Quay. All three images share one version: tags look like `v1.0.0-202611021200` (`<repo-version>-<UTC build timestamp>`), plus a floating `:latest`. `<repo-version>` comes from the most recent `device-trust-mesh-v*` tag (`v0.0.0` until one exists). Cut a release by pushing a tag, then take the exact `<version_tag>` from the run it triggered:
+The [`device-trust-mesh-build-images.yml`](../.github/workflows/device-trust-mesh-build-images.yml) workflow builds all four for `linux/amd64` and `linux/arm64`. Pull requests build without pushing; pushes to `main`, `device-trust-mesh-v*` tags and manual runs push to Quay. All four images share one version: tags look like `v1.0.0-202611021200` (`<repo-version>-<UTC build timestamp>`), plus a floating `:latest`. `<repo-version>` comes from the most recent `device-trust-mesh-v*` tag (`v0.0.0` until one exists). Cut a release by pushing a tag, then take the exact `<version_tag>` from the run it triggered:
 
 ```bash
 git tag device-trust-mesh-v1.0.0
 git push-external origin device-trust-mesh-v1.0.0
 ```
 
-The dependency pins live in `pyproject.toml` and the base images in the three Dockerfiles. The simulator and UI images install the package without the `serve` extra, so they carry no Ray. When the Ray base image changes, change the `ray[serve]` pin and the RayService `rayVersion` with it.
+The dependency pins live in `pyproject.toml` and the base images in the four Dockerfiles. The simulator, UI and context images install the package without the `serve` extra, so they carry no Ray. When the Ray base image changes, change the `ray[serve]` pin and the RayService `rayVersion` with it.
 
-`./build.sh [tag]` builds all three images locally for the host platform (default tag `dev`).
+`./build.sh [tag]` builds all four images locally for the host platform (default tag `dev`).
 
 ## Development
 
@@ -191,6 +192,22 @@ uv venv -p 3.12 .venv && uv pip install -p .venv -e '.[serve]'
 - `list_devices(customer_id=None, trust_status=None)`
 
 The same data is mirrored over REST, next to the MCP endpoint: `GET /v1/devices/{device_id}?min_seq=`, `GET /v1/devices?customer_id=&trust_status=`, `GET /v1/customers/{customer_id}`, `GET /v1/devices/{device_id}/signals?limit=`, `GET /healthz` (503 until the materializer has caught up) and `GET /metrics`. Agents call the tools through `dtm.common.context_client.ContextClient`, which retries a `STALE` lookup. The MCP endpoint accepts loopback and `device-trust-mesh-serve-svc` Host headers; `DTM_CONTEXT_ALLOWED_HOSTS` adds more (comma-separated host names).
+
+The same server also runs as a plain process, without Ray, in the `device-trust-mesh-context` image: `python -m dtm.mesh.context` serves the MCP endpoint at `/mcp` and the REST mirror, `/healthz` (readiness: 503 until the materializer has caught up), `/livez` (liveness: 500 once the materializer thread has stopped) and `/metrics` on one port. It needs Kafka and Schema Registry, so run it against a reachable cluster:
+
+```bash
+DEVICE_CAP=100 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 SCHEMA_REGISTRY_URL=http://localhost:8081 \
+  .venv/bin/python -m dtm.mesh.context
+curl localhost:8080/healthz
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DEVICE_CAP` | required | Size of the device pool; set it to the simulator's value |
+| `KAFKA_BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL` | in-cluster addresses | Kafka and Schema Registry endpoints; the OAuth variables under [Authentication](#authentication) apply |
+| `DTM_CONTEXT_PORT` | `8080` | Port to listen on |
+| `DTM_CONTEXT_WAIT_TIMEOUT_MS` | `2000` | How long a `min_seq` lookup waits for materialization |
+| `DTM_CONTEXT_ALLOWED_HOSTS` | none | Extra `Host` header names the MCP endpoint accepts, comma-separated |
 
 ## Schemas
 

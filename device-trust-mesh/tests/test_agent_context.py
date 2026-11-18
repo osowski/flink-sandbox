@@ -10,6 +10,7 @@ from dtm.mesh.agents import context as context_module
 from dtm.mesh.agents.context import SyncContext
 from dtm.mesh.context.server import build_mcp
 from mcp.client.client import Client
+from trail_capture import capture
 
 DEVICES = [{"device_id": "dev-0001"}, {"device_id": "dev-0002", "trust_status": "SUSPECT"}]
 CUSTOMERS = [{"customer_id": "cust-001"}]
@@ -257,6 +258,56 @@ class SyncContextTest(unittest.TestCase):
         self.ctx.close()
         with self.assertRaisesRegex(RuntimeError, "closed"):
             self.ctx.get_device_context("dev-0001")
+
+
+class ContextTrailTest(unittest.TestCase):
+    def setUp(self):
+        table = context_table(devices=DEVICES, customers=CUSTOMERS, signals=SIGNALS)
+        self.ctx = SyncContext(build_mcp(table, wait_timeout_ms=50), timeout_s=5.0)
+        self.addCleanup(self.ctx.close)
+        self.cap = capture(self)
+
+    def test_context_line_per_tool_call(self):
+        self.ctx.get_device_context("dev-0001")
+        self.ctx.get_customer_context("cust-001")
+        self.ctx.list_risk_signals("dev-0001")
+        lines = self.cap.step_records("context")
+        self.assertEqual([r.dtm["tool"] for r in lines],
+                         ["get_device_context", "get_customer_context", "list_risk_signals"])
+        for record in lines:
+            self.assertIsInstance(record.dtm["latency_ms"], int)
+            self.assertGreaterEqual(record.dtm["latency_ms"], 0)
+            self.assertEqual(record.dtm["status"], "OK")
+
+    def test_context_line_seq_from_as_of(self):
+        result = self.ctx.get_device_context("dev-0001", min_seq=7)
+        (record,) = self.cap.step_records("context")
+        self.assertEqual(record.dtm["seq"], result["as_of"]["contextSeq"])
+
+    def test_context_line_tolerates_shapes(self):
+        self.ctx.get_device_context("dev-9999")
+        self.ctx.list_risk_signals("dev-0002")
+        missing, signals = self.cap.step_records("context")
+        self.assertEqual(missing.dtm["status"], "NOT_FOUND")
+        self.assertNotIn("seq", missing.dtm)
+        self.assertEqual(signals.dtm["status"], "OK")
+        self.assertNotIn("seq", signals.dtm)
+
+    def test_context_fields_never_raise_on_odd_results(self):
+        for odd in ({}, {"status": "OK", "as_of": None}, {"as_of": {"contextSeq": None}}, None, "text"):
+            fields = context_module._context_fields("get_device_context", odd, 3)
+            self.assertEqual(fields["tool"], "get_device_context")
+            self.assertEqual(fields["latency_ms"], 3)
+
+    def test_failed_call_logs_no_context_line(self):
+        self.ctx.close()
+        with self.assertRaises(RuntimeError):
+            self.ctx.get_device_context("dev-0001")
+        self.assertEqual(self.cap.step_records("context"), [])
+
+    def test_probe_logs_no_context_line(self):
+        self.ctx.probe(5.0)
+        self.assertEqual(self.cap.step_records("context"), [])
 
 
 if __name__ == "__main__":

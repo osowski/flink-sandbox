@@ -23,6 +23,7 @@ from dtm.common.a2a import SELF_TASK_TOPIC, agent_card, task_topic
 from dtm.common.bus import AgentBus, CommitFailed, DeliveryFailed, Inbound
 from dtm.common.config import AgentSettings, ConfigError, FileConfigSource
 from dtm.common.metrics import HANDLER_ERRORS, LOOP_ERRORS, PROCESSING_LATENCY_MS
+from dtm.mesh import trail
 
 log = logging.getLogger(__name__)
 
@@ -85,12 +86,7 @@ class AgentRuntime:
                 if not self._active:
                     self._rewind(batch[i:])
                     break
-                self._handle(inbound)
-                try:
-                    self.bus.commit(inbound)
-                except (DeliveryFailed, CommitFailed) as e:
-                    log.error("%s: not committing %s[%s]@%s, it will be processed again: %s",
-                              self.name, inbound.topic, inbound.partition, inbound.offset, e)
+                if not self._handle_and_commit(inbound):
                     self._rewind(batch[i:])
                     break
                 handled += 1
@@ -108,6 +104,23 @@ class AgentRuntime:
                 log.exception("%s: poll loop iteration failed, retrying in %ss", self.name, _LOOP_BACKOFF_S)
                 stop.wait(_LOOP_BACKOFF_S)
 
+    def _handle_and_commit(self, inbound: Inbound) -> bool:
+        """Handle and commit one record inside its trail scope; return False when the commit failed."""
+        with trail.message_scope(inbound.topic, inbound.partition, inbound.offset):
+            self._handle(inbound)
+            try:
+                self.bus.commit(inbound)
+            except (DeliveryFailed, CommitFailed) as e:
+                log.error("%s: not committing %s[%s]@%s, it will be processed again: %s",
+                          self.name, inbound.topic, inbound.partition, inbound.offset, e,
+                          extra={"dtm": {"step": "commit_failed", **trail.position()}})
+                return False
+            if trail.established():
+                trail.step("committed", **trail.position())
+            else:
+                trail.step("skipped", logging.DEBUG, **trail.position(), reason="no task")
+            return True
+
     def _handle(self, inbound: Inbound) -> None:
         started = time.monotonic()
         try:
@@ -115,7 +128,7 @@ class AgentRuntime:
         except Exception:
             HANDLER_ERRORS.labels(self.name).inc()
             log.exception("%s: handler failed on %s[%s]@%s", self.name, inbound.topic, inbound.partition,
-                          inbound.offset)
+                          inbound.offset, extra={"dtm": {"step": "handler_failed", **trail.position()}})
         finally:
             PROCESSING_LATENCY_MS.labels(self.name).observe((time.monotonic() - started) * 1000)
 

@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import tempfile
@@ -13,9 +14,12 @@ from agent_fakes import make_bus, request_inbound
 from dtm.common.a2a import SELF_TASK_TOPIC, dumps
 from dtm.common.config import FileConfigSource
 from dtm.mesh.agents import host as host_module
-from dtm.mesh.agents.host import AgentHost, agent_deployment, build_agent_api
+from dtm.mesh.agents.host import (AgentHost, ServeLogBridge, agent_deployment, build_agent_api,
+                                  configure_agent_logging)
 from dtm.mesh.agents.reasoning import AgentLlm
+from dtm.mesh import trail
 from fakes import msg
+from trail_capture import capture
 
 FIXTURE = Path(__file__).parent / "fixtures" / "etc-dtm"
 BOOTSTRAP = "kafka.test:9071"
@@ -281,6 +285,95 @@ class AgentDeploymentTest(unittest.TestCase):
         self.assertEqual(metrics.status_code, 200)
         self.assertTrue(metrics.headers["content-type"].startswith("text/plain"))
         self.assertIn("dtm_agent_processing_latency_ms", metrics.text)
+
+
+class AgentLoggingTest(unittest.TestCase):
+    def setUp(self):
+        dtm = logging.getLogger("dtm")
+        saved = (list(dtm.handlers), dtm.level, dtm.propagate)
+
+        def restore():
+            dtm.handlers[:] = saved[0]
+            dtm.setLevel(saved[1])
+            dtm.propagate = saved[2]
+
+        self.addCleanup(restore)
+        self.serve = capture(self, "ray.serve", with_scope_filter=False)
+
+    def decision_in_scope(self):
+        with trail.message_scope("agent.tasks.risk", 0, 4):
+            trail.establish("risk", "task-1", "ctx-1", "dev-0001")
+            trail.step("decision", outcome="SCORED")
+
+    def test_dtm_records_reach_ray_serve_with_ids(self):
+        configure_agent_logging("INFO")
+        self.decision_in_scope()
+        self.assertEqual(self.serve.steps(), ["received", "decision"])
+        self.assertEqual(self.serve.step_records("decision")[0].dtm["task_id"], "task-1")
+
+    def test_plain_dtm_records_inside_a_task_carry_its_ids(self):
+        configure_agent_logging("INFO")
+        with trail.message_scope("agent.tasks.risk", 0, 4):
+            trail.establish("risk", "task-1", "ctx-1", "dev-0001")
+            logging.getLogger("dtm.mesh.agents.kit").warning("skipping something")
+        warning = [r for r in self.serve.records if r.levelno == logging.WARNING][0]
+        self.assertEqual(warning.dtm["task_id"], "task-1")
+
+    def test_task_id_survives_serve_attribute_filter(self):
+        from ray.serve._private.logging_utils import ServeLogAttributeRemovalFilter
+        configure_agent_logging("INFO")
+        self.decision_in_scope()
+        record = self.serve.step_records("decision")[0]
+        ServeLogAttributeRemovalFilter().filter(record)
+        self.assertEqual(record.dtm["task_id"], "task-1")
+
+    def test_serve_json_formatter_writes_dtm_as_a_nested_object(self):
+        import json as json_module
+
+        from ray._common.formatters import JSONFormatter
+        configure_agent_logging("INFO")
+        self.decision_in_scope()
+        line = json_module.loads(JSONFormatter().format(self.serve.step_records("decision")[0]))
+        self.assertEqual(line["dtm"]["task_id"], "task-1")
+        self.assertEqual(line["dtm"]["step"], "decision")
+        self.assertEqual(line["message"], "decision")
+
+    def test_a_failing_serve_logger_never_raises_into_the_agent(self):
+        configure_agent_logging("INFO")
+        with mock.patch.object(logging.getLogger("ray.serve"), "handle", side_effect=RuntimeError("filter broke")), \
+                mock.patch.object(ServeLogBridge, "handleError") as handle_error:
+            self.decision_in_scope()
+        self.assertEqual(handle_error.call_count, 2)
+
+    def test_idempotent_single_bridge(self):
+        configure_agent_logging("INFO")
+        configure_agent_logging("INFO")
+        bridges = [h for h in logging.getLogger("dtm").handlers if isinstance(h, ServeLogBridge)]
+        self.assertEqual(len(bridges), 1)
+        self.decision_in_scope()
+        self.assertEqual(self.serve.steps(), ["received", "decision"])
+
+    def test_no_propagation_to_root(self):
+        configure_agent_logging("INFO")
+        self.assertFalse(logging.getLogger("dtm").propagate)
+
+    def test_warning_level_suppresses_info(self):
+        configure_agent_logging("WARNING")
+        self.decision_in_scope()
+        self.assertEqual(self.serve.records, [])
+
+    def test_level_from_environment(self):
+        with mock.patch.dict(os.environ, {"DTM_LOG_LEVEL": "debug"}):
+            configure_agent_logging()
+        self.assertEqual(logging.getLogger("dtm").level, logging.DEBUG)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DTM_LOG_LEVEL", None)
+            configure_agent_logging()
+        self.assertEqual(logging.getLogger("dtm").level, logging.INFO)
+
+    def test_invalid_level_raises(self):
+        with self.assertRaises(ValueError):
+            configure_agent_logging("verbose")
 
 
 if __name__ == "__main__":

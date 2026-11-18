@@ -38,5 +38,7 @@ class RevocationAgent:
             return
         outputs = Outputs(self._bus, self.name, settings, request, clock=self._clock)
         task_id = outputs.new_task_id()
+        outputs.begin(task_id)
         outputs.submitted(task_id)
         outputs.status(task_id, REJECTED, REJECTION)
+        outputs.decision(None, "REJECTED", rule="NOT_ROUTED")

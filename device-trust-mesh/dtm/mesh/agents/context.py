@@ -12,13 +12,16 @@ session lock, within a grace of that however long it queued behind another call 
 close, and a call made once ``close`` has begun raises ``RuntimeError``.
 """
 import asyncio
+import contextvars
 import logging
 import threading
+import time
 from collections.abc import Awaitable, Callable
 
 from mcp.server.mcpserver import MCPServer
 
 from dtm.common.context_client import ContextClient
+from dtm.mesh import trail
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +39,19 @@ class _Session:
         self.owner = owner
 
 
+def _context_fields(tool: str, result, latency_ms: int) -> dict:
+    """The ``context`` line's fields for a tool result of any shape; never raises."""
+    fields = {"tool": tool, "latency_ms": latency_ms}
+    if isinstance(result, list):
+        fields["status"] = "OK"
+    elif isinstance(result, dict):
+        fields["status"] = result.get("status")
+        as_of = result.get("as_of")
+        if isinstance(as_of, dict):
+            fields["seq"] = as_of.get("contextSeq")
+    return fields
+
+
 class SyncContext:
     def __init__(self, target: str | MCPServer, *, timeout_s: float = 10.0):
         self._target = target
@@ -49,13 +65,20 @@ class SyncContext:
         self._thread.start()
 
     def get_device_context(self, device_id: str, min_seq: int | None = None) -> dict:
-        return self._call(lambda client: client.get_device_context(device_id, min_seq))
+        return self._tool("get_device_context", lambda client: client.get_device_context(device_id, min_seq))
 
     def get_customer_context(self, customer_id: str) -> dict:
-        return self._call(lambda client: client.get_customer_context(customer_id))
+        return self._tool("get_customer_context", lambda client: client.get_customer_context(customer_id))
 
     def list_risk_signals(self, device_id: str, limit: int = 10) -> list[dict]:
-        return self._call(lambda client: client.list_risk_signals(device_id, limit))
+        return self._tool("list_risk_signals", lambda client: client.list_risk_signals(device_id, limit))
+
+    def _tool(self, tool: str, use: Callable[[ContextClient], Awaitable]):
+        """Make one context tool call and log its ``context`` trail line on the calling thread."""
+        started = time.monotonic()
+        result = self._call(use)
+        trail.step("context", **_context_fields(tool, result, round((time.monotonic() - started) * 1000)))
+        return result
 
     def probe(self, timeout_s: float) -> None:
         """Return once context-mcp answers a trivial tool call within ``timeout_s``; raise otherwise."""
@@ -139,7 +162,8 @@ class SyncContext:
                 if not ready.done():
                     ready.cancel()
 
-        owner = self._loop.create_task(own())
+        # A fresh context, so the session's own log lines don't carry the trail ids of the record that opened it.
+        owner = self._loop.create_task(own(), context=contextvars.Context())
         try:
             client = await ready
         except BaseException:

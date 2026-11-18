@@ -1,4 +1,5 @@
 import json
+import logging
 import unittest
 
 from prometheus_client import REGISTRY
@@ -10,7 +11,9 @@ from dtm.common.bus import Inbound
 from dtm.common.envelope import Envelope
 from dtm.mesh.agents.kit import (AGENT_VERSION, FAILED, Outputs, SUBMITTED, WORKING, parse_request,
                                  parse_task_event, run_task)
+from dtm.mesh import trail
 from dtm.mesh.llm import OK, LLMRequest, LLMResponse
+from trail_capture import capture
 
 CLOCK = lambda: 1793323940.5  # noqa: E731
 ENROLMENT_REQUEST = {"taskType": "DECIDE_ENROLMENT", "deviceId": "dev-0001"}
@@ -213,6 +216,66 @@ class KitTest(unittest.TestCase):
             self.assertIsNone(parse_task_event(self.bus, Inbound("agent.task-events", 0, 0, None, {},
                                                                  {"jsonrpc": "2.0", "id": "x"}, 0)))
         self.assertEqual(invalid_count("risk") - before, 1)
+
+
+class TrailLinesTest(unittest.TestCase):
+    def setUp(self):
+        self.bus = make_bus("risk")
+        self.cap = capture(self)
+        request = parse_request(self.bus, request_inbound("agent.tasks.risk", RISK_REQUEST, offset=4))
+        self.request = request
+        self.outputs = Outputs(self.bus, "risk", settings("risk"), request, clock=CLOCK)
+
+    def test_begin_logs_received_with_ids(self):
+        with trail.message_scope("agent.tasks.risk", 0, 4):
+            self.outputs.begin("task-1")
+            self.assertTrue(trail.established())
+        (record,) = self.cap.step_records("received")
+        self.assertEqual(record.dtm, {"agent": "risk", "task_id": "task-1", "context_id": self.request.context_id,
+                                      "device_id": "dev-0001", "step": "received",
+                                      "topic": "agent.tasks.risk", "partition": 0, "offset": 4})
+
+    def test_decision_line(self):
+        with trail.message_scope("agent.tasks.risk", 0, 4):
+            self.outputs.begin("task-1")
+            self.outputs.decision("enrolment-decision", "DENY", rule="COMPROMISED_OS", policy_action="BLOCK")
+        (record,) = self.cap.step_records("decision")
+        self.assertEqual(record.levelno, logging.INFO)
+        self.assertEqual({k: record.dtm[k] for k in ("task_id", "artifact", "outcome", "rule", "policy_action")},
+                         {"task_id": "task-1", "artifact": "enrolment-decision", "outcome": "DENY",
+                          "rule": "COMPROMISED_OS", "policy_action": "BLOCK"})
+
+    def test_decision_without_rule_omits_it(self):
+        self.outputs.decision("risk-assessment", "SCORED")
+        self.assertNotIn("rule", self.cap.step_records("decision")[0].dtm)
+
+    def test_model_line_matches_interaction_record(self):
+        req = LLMRequest("ollama", "qwen3:4b", [{"role": "user", "content": "secret prompt"}], {"type": "object"},
+                         {}, "risk.v1", "router-0")
+        resp = LLMResponse(OK, {"score": 3}, {"score": 3}, 812)
+        with trail.message_scope("agent.tasks.risk", 0, 4):
+            self.outputs.begin("task-1")
+            message_id = self.outputs.llm_interaction(req, resp, "PASSED")
+        (record,) = self.cap.step_records("model")
+        ((_, value),) = produced(self.bus, "agent.llm-interactions")
+        self.assertEqual(record.dtm["request_hash"], value["request_hash"])
+        self.assertEqual(record.dtm["llm_interaction_id"], message_id)
+        self.assertEqual({k: record.dtm[k] for k in ("task_id", "model", "latency_ms", "status", "guardrail_result")},
+                         {"task_id": "task-1", "model": "qwen3:4b", "latency_ms": 812, "status": OK,
+                          "guardrail_result": "PASSED"})
+        self.assertNotIn("secret prompt", json.dumps(record.dtm))
+        self.assertNotIn("messages", record.dtm)
+
+    def test_task_failed_line(self):
+        def body():
+            raise RuntimeError("boom")
+
+        with trail.message_scope("agent.tasks.risk", 0, 4):
+            self.outputs.begin("task-1")
+            run_task(self.outputs, "task-1", body)
+        (record,) = self.cap.step_records("task_failed")
+        self.assertEqual(record.levelno, logging.ERROR)
+        self.assertEqual(record.dtm["task_id"], "task-1")
 
 
 if __name__ == "__main__":

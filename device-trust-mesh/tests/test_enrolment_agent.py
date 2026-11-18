@@ -9,6 +9,8 @@ from dtm.mesh.agents.kit import AUTH_REQUIRED, COMPLETED, FAILED, REJECTED, SUBM
 from dtm.mesh.agents.reasoning import AgentLlm
 from dtm.mesh.context.server import build_mcp
 from dtm.mesh.llm import ERROR, OK, LLMResponse
+from dtm.mesh import trail
+from trail_capture import assert_trail, capture
 
 CLOCK = lambda: 1793323940.5  # noqa: E731
 DEVICES = [{"device_id": "dev-0001", "trust_status": "PENDING"}]
@@ -77,6 +79,42 @@ class EnrolmentAgentTest(unittest.TestCase):
         else:
             (record,) = self.commands()
             self.assertEqual((record["action"], record["reason"]), command)
+
+    def trail(self, run):
+        cap = capture(self)
+        with trail.message_scope(TOPIC, 0, 0):
+            run()
+        return cap
+
+    def test_enrolment_trail_llm(self):
+        cap = self.trail(lambda: self.run_request(self.agent(ScriptedProvider(decided("GRANT"))),
+                                                  decide_data(assessment(10))))
+        lines = assert_trail(self, cap, ["received", "context", "context", "model", "decision"], "enrolment")
+        self.assertEqual(lines[0].dtm["task_id"], TASK_ID)
+        self.assertEqual({k: lines[-1].dtm.get(k) for k in ("artifact", "outcome", "policy_action", "rule")},
+                         {"artifact": "enrolment-decision", "outcome": "GRANTED", "policy_action": "ALLOW",
+                          "rule": None})
+        self.assertEqual(lines[3].dtm["guardrail_result"], "PASSED")
+
+    def test_enrolment_trail_pre_llm_rule(self):
+        signals = [{"device_id": "dev-0001", "signal_id": "sig-9", "signal_type": "COMPROMISED_OS"}]
+        cap = self.trail(lambda: self.run_request(self.agent(ScriptedProvider(), signals=signals),
+                                                  decide_data(assessment(10))))
+        lines = assert_trail(self, cap, ["received", "context", "context", "decision"], "enrolment")
+        self.assertEqual((lines[-1].dtm["outcome"], lines[-1].dtm["rule"]), ("DENIED", "COMPROMISED_OS"))
+
+    def test_enrolment_trail_remove_trust(self):
+        cap = self.trail(lambda: self.run_request(self.agent(ScriptedProvider(), devices=[]),
+                                                  {"taskType": "REMOVE_TRUST", "deviceId": "dev-0001"}))
+        lines = assert_trail(self, cap, ["received", "decision"], "enrolment")
+        self.assertEqual((lines[-1].dtm["outcome"], lines[-1].dtm["rule"]), ("REMOVED", "REMOVE_TRUST"))
+
+    def test_enrolment_trail_resolve(self):
+        cap = self.trail(lambda: self.resolve("PASSED"))
+        lines = assert_trail(self, cap, ["received", "decision"], "enrolment")
+        self.assertEqual(lines[0].dtm["task_id"], "enrolment-task-1")
+        self.assertEqual({k: lines[-1].dtm[k] for k in ("outcome", "rule", "challenge_result")},
+                         {"outcome": "GRANTED", "rule": "RESOLVE_CHALLENGE", "challenge_result": "PASSED"})
 
     def test_clean_grant_allows_and_completes(self):
         self.run_request(self.agent(ScriptedProvider(decided("GRANT"))), decide_data(assessment(10)))

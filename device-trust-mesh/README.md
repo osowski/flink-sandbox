@@ -77,6 +77,27 @@ An agent consumes its own `agent.tasks.<name>` topic and its card advertises tha
 - In the `prometheus_client` registry, served at each Serve app's `/metrics` route. Through the Serve proxy that route reaches one replica, so read it only for a single replica; the UI's materialization-lag summary reads context-mcp's.
 - In `ray.util.metrics`. Ray's metrics agent on each node (`--metrics-export-port`, 8080 on KubeRay) exports every replica's series as `ray_dtm_*` with a `WorkerId` label; scrape that port and aggregate across workers. Ray estimates a histogram's `_sum` from bucket midpoints, so use its buckets, not averages. Outside a Ray worker, and in the simulator and UI images (no Ray), this side records nothing.
 
+## Logging
+
+Each agent logs a per-task trail on its `dtm` loggers. `AgentRuntime` opens a scope for every record it handles (`dtm/mesh/trail.py`), and every trail field goes in the record's `dtm` dict: `agent`, `task_id`, `context_id`, `device_id`, `step` and the step's own fields. They are nested because Ray Serve deletes a top-level `task_id` from its replica logs.
+
+| `step` | Level | Logged when | Fields |
+|---|---|---|---|
+| `received` | INFO | The handler has parsed the record and established its task | `topic`, `partition`, `offset` |
+| `context` | INFO | Each context tool call returns | `tool`, `status`, `seq` (the context sequence, when there is one), `latency_ms` |
+| `model` | INFO | A model call is recorded on `agent.llm-interactions` | `request_hash`, `model`, `latency_ms`, `status`, `guardrail_result`, `llm_interaction_id` |
+| `decision` | INFO | The agent emits its result | `artifact`, `outcome`, `rule` on rule paths, plus agent-specific fields |
+| `committed` | INFO | The record's offset is committed | `topic`, `partition`, `offset` |
+| `skipped` | DEBUG | A record that established no task (invalid, or an event compliance doesn't audit) is committed | `topic`, `partition`, `offset`, `reason` |
+
+An agent logs only the steps it takes: compliance and revocation fetch no context and call no model. A failure inside a task logs at ERROR with `step` set to `handler_failed`, `commit_failed` or `task_failed`, and every other `dtm` record logged during a task carries its ids.
+
+In a Serve replica, `configure_agent_logging` (`dtm/mesh/agents/host.py`) hands the `dtm` records to the `ray.serve` logger, so they land in the replica's log under `/tmp/ray/session_latest/logs/serve/`. Set the RayService application's `logging_config.encoding` to `JSON` for one JSON object per line.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DTM_LOG_LEVEL` | `INFO` | Level of the agents' `dtm` loggers, any case. `WARNING` hides the trail; an unknown name fails the replica's start-up |
+
 ## Simulator
 
 `python -m dtm.simulator` runs the device simulator. It produces `ENROL_REQUESTED` and `UNENROL_REQUESTED` events to `device.events`, keyed by `device_id`, and closes the loop: it consumes `device.policy-commands` and answers every `CHALLENGE` command (once, echoing the enrolment's `correlation_id` and `enrolment_task_id`) with `CHALLENGE_PASSED` or `CHALLENGE_FAILED` after 2 s. A `CHALLENGE` command without an `enrolment_task_id` is not answered, because the router drops such an answer. Presenter commands arrive on `simulator.control`.

@@ -48,6 +48,7 @@ class RiskAgent:
             return
         outputs = Outputs(self._bus, self.name, settings, request, clock=self._clock)
         task_id = outputs.new_task_id()
+        outputs.begin(task_id)
         outputs.submitted(task_id)
         outputs.status(task_id, WORKING)
         run_task(outputs, task_id, lambda: self._assess(outputs, task_id, request, settings))
@@ -74,6 +75,7 @@ class RiskAgent:
                          {"score": score, "rationale": rationale, "signalIds": signal_ids,
                           "asOf": {key: as_of[key] for key in ("contextSeq", "materializedAt", "sourceOffsets")}},
                          f"Risk {score}/100: {rationale}")
+        outputs.decision("risk-assessment", "SCORED", score=score)
         outputs.send("enrolment",
                      {"taskType": "DECIDE_ENROLMENT", "deviceId": device_id, "customerId": customer_id,
                       "riskAssessment": {"score": score, "rationale": rationale, "signalIds": signal_ids,

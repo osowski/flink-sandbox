@@ -42,6 +42,7 @@ class ComplianceAgent:
             return
         outputs = Outputs(self._bus, self.name, settings, event, clock=self._clock, own_rpc_ids=True)
         task_id = outputs.new_task_id()
+        outputs.begin(task_id)
         run_task(outputs, task_id, lambda: self._audit(outputs, task_id, event))
 
     def _auditable(self, event: TaskEvent, inbound: Inbound) -> bool:
@@ -76,4 +77,7 @@ class ComplianceAgent:
         audit = outputs.avro(AUDIT_LOG_TOPIC, record)
         outputs.artifact(task_id, AUDIT_RECORD, {"auditId": audit.message_id, "subjectTaskId": event.task_id},
                          f"Audited {event.artifact_name} for {event.envelope.device_id}")
+        outputs.decision(AUDIT_RECORD, "AUDITED", rule="AUDITABLE_ARTIFACT",
+                         subject_agent=agent_id.removeprefix(_AGENT_PREFIX), subject_task_id=event.task_id,
+                         subject_artifact=event.artifact_name)
         outputs.status(task_id, COMPLETED)

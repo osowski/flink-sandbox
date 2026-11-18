@@ -18,7 +18,8 @@ from dtm.common.bus import POLICY_COMMANDS_TOPIC, AgentBus, Inbound
 from dtm.common.config import AgentSettings
 from dtm.common.envelope import Envelope
 from dtm.common.metrics import INVALID_REQUESTS
-from dtm.mesh.llm import LLMRequest, LLMResponse, llm_interaction_record
+from dtm.mesh import trail
+from dtm.mesh.llm import LLMRequest, LLMResponse, llm_interaction_record, request_hash
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class Outputs:
     def __init__(self, bus: AgentBus, agent: str, settings: AgentSettings, cause: Cause,
                  clock: Callable[[], float] = time.time, own_rpc_ids: bool = False):
         self._bus = bus
+        self._agent = agent
         self._agent_id = f"agent:{agent}"
         self._settings = settings
         self._cause = cause
@@ -134,6 +136,15 @@ class Outputs:
 
     def new_task_id(self) -> str:
         return ids.task_id(self._agent_id, self._cause.message_id)
+
+    def begin(self, task_id: str) -> None:
+        """Start the task's log trail: bind its ids and log ``received``."""
+        trail.establish(self._agent, task_id, self._cause.context_id, self._cause.envelope.device_id)
+
+    @staticmethod
+    def decision(artifact: str | None, outcome: str, rule: str | None = None, **fields) -> None:
+        """Log the task's ``decision``: the output carrying the result, its outcome and, on a rule path, the rule."""
+        trail.step("decision", artifact=artifact, outcome=outcome, rule=rule, **fields)
 
     def next_envelope(self) -> Envelope:
         inbound = self._cause.envelope
@@ -180,7 +191,10 @@ class Outputs:
     def llm_interaction(self, req: LLMRequest, resp: LLMResponse, guardrail_result: str | None = None) -> str:
         record = llm_interaction_record(self.next_envelope(), req, resp, guardrail_result)
         self._bus.produce_avro(LLM_INTERACTIONS_TOPIC, record, self._key)
-        return record["envelope"]["message_id"]
+        message_id = record["envelope"]["message_id"]
+        trail.step("model", request_hash=request_hash(req), model=req.model, latency_ms=resp.latency_ms,
+                   status=resp.status, guardrail_result=guardrail_result, llm_interaction_id=message_id)
+        return message_id
 
     def avro(self, topic: str, fields: dict | Callable[[Envelope], dict]) -> Envelope:
         """Produce a record of ``fields``; a callable builds them from the record's own envelope."""
@@ -198,5 +212,5 @@ def run_task(outputs: Outputs, task_id: str, body: Callable[[], None]) -> None:
     try:
         body()
     except Exception as e:
-        log.exception("task %s failed", task_id)
+        log.exception("task %s failed", task_id, extra={"dtm": {"step": "task_failed"}})
         outputs.status(task_id, FAILED, f"{type(e).__name__}: {e}")

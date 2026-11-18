@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import logging
 import shutil
 import tempfile
 import threading
@@ -18,6 +19,8 @@ from dtm.common.envelope import Envelope
 from dtm.mesh import runtime as runtime_module
 from dtm.mesh.runtime import AgentRuntime
 from fakes import FakeConsumer, FakeProducer, msg
+from dtm.mesh import trail
+from trail_capture import capture
 
 FIXTURE = Path(__file__).parent / "fixtures" / "etc-dtm"
 BOOTSTRAP = "kafka.test:9071"
@@ -613,6 +616,83 @@ class RuntimeTest(unittest.TestCase):
                 rt.run(stop)
         self.assertTrue(watchdog.is_alive())
         rt.step.assert_called_once()
+
+
+class RuntimeTrailTest(unittest.TestCase):
+    """The runtime's trail lines: committed, skipped, and the failure lines, each in the record's scope."""
+
+    setUp = RuntimeTest.setUp
+    runtime = RuntimeTest.runtime
+    recording_handler = RuntimeTest.recording_handler
+
+    @staticmethod
+    def establishing(task_id="task-1", then=None):
+        def handle(inbound, settings):
+            trail.establish("risk", task_id, "ctx-1", "dev-0001")
+            if then is not None:
+                then()
+        return handle
+
+    def test_committed_line_after_established_task(self):
+        cap = capture(self)
+        rt = self.runtime("risk", handler=self.establishing(then=lambda: trail.step("decision", outcome="X")))
+        rt.start()
+        rt.bus._consumer.queue([req(1)])
+        self.assertEqual(rt.step(), 1)
+        self.assertEqual(cap.steps(), ["received", "decision", "committed"])
+        committed = cap.step_records("committed")[0]
+        self.assertEqual(committed.levelno, logging.INFO)
+        self.assertEqual(committed.dtm, {"agent": "risk", "task_id": "task-1", "context_id": "ctx-1",
+                                         "device_id": "dev-0001", "step": "committed",
+                                         "topic": "agent.tasks.risk", "partition": 0, "offset": 1})
+
+    def test_unestablished_record_logs_debug_skipped_only(self):
+        cap = capture(self)
+        rt = self.runtime("risk", handler=lambda inbound, settings: None)
+        rt.start()
+        rt.bus._consumer.queue([req(1)])
+        self.assertEqual(rt.step(), 1)
+        self.assertEqual(cap.steps(logging.INFO), [])
+        skipped = cap.step_records("skipped")
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0].levelno, logging.DEBUG)
+        self.assertEqual(skipped[0].dtm, {"step": "skipped", "topic": "agent.tasks.risk", "partition": 0,
+                                          "offset": 1, "reason": "no task"})
+
+    def test_scope_does_not_leak_after_handler_exception(self):
+        cap = capture(self)
+        calls = []
+
+        def handle(inbound, settings):
+            calls.append(inbound.offset)
+            if len(calls) == 1:
+                trail.establish("risk", "task-1", "ctx-1", "dev-0001")
+                raise RuntimeError("boom")
+
+        rt = self.runtime("risk", handler=handle)
+        rt.start()
+        rt.bus._consumer.queue([req(1), req(2)])
+        self.assertEqual(rt.step(), 2)
+        failed = cap.step_records("handler_failed")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0].levelno, logging.ERROR)
+        self.assertEqual(failed[0].dtm["task_id"], "task-1")
+        second = [r for r in cap.records if getattr(r, "dtm", {}).get("offset") == 2]
+        self.assertEqual([r.dtm["step"] for r in second], ["skipped"])
+        self.assertNotIn("task_id", second[0].dtm)
+
+    def test_commit_failure_line(self):
+        cap = capture(self)
+        rt = self.runtime("risk", handler=self.establishing())
+        rt.start()
+        rt.bus._consumer.commit_error = "broker said no"
+        rt.bus._consumer.queue([req(1)])
+        self.assertEqual(rt.step(), 0)
+        failed = cap.step_records("commit_failed")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0].levelno, logging.ERROR)
+        self.assertEqual(failed[0].dtm["task_id"], "task-1")
+        self.assertEqual(cap.step_records("committed"), [])
 
 
 if __name__ == "__main__":

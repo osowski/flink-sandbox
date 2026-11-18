@@ -149,7 +149,11 @@ class ServeLogBridge(logging.Handler):
     """
 
     def emit(self, record: logging.LogRecord) -> None:
-        logging.getLogger("ray.serve").handle(record)
+        # A log line must never fail the agent's task: report the error the way logging does, and go on.
+        try:
+            logging.getLogger("ray.serve").handle(record)
+        except Exception:
+            self.handleError(record)
 
 
 def configure_agent_logging(level: str | None = None) -> None:

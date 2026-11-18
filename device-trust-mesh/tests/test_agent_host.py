@@ -338,6 +338,13 @@ class AgentLoggingTest(unittest.TestCase):
         self.assertEqual(line["dtm"]["step"], "decision")
         self.assertEqual(line["message"], "decision")
 
+    def test_a_failing_serve_logger_never_raises_into_the_agent(self):
+        configure_agent_logging("INFO")
+        with mock.patch.object(logging.getLogger("ray.serve"), "handle", side_effect=RuntimeError("filter broke")), \
+                mock.patch.object(ServeLogBridge, "handleError") as handle_error:
+            self.decision_in_scope()
+        self.assertEqual(handle_error.call_count, 2)
+
     def test_idempotent_single_bridge(self):
         configure_agent_logging("INFO")
         configure_agent_logging("INFO")

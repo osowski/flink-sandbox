@@ -12,6 +12,7 @@ session lock, within a grace of that however long it queued behind another call 
 close, and a call made once ``close`` has begun raises ``RuntimeError``.
 """
 import asyncio
+import contextvars
 import logging
 import threading
 import time
@@ -161,7 +162,8 @@ class SyncContext:
                 if not ready.done():
                     ready.cancel()
 
-        owner = self._loop.create_task(own())
+        # A fresh context, so the session's own log lines don't carry the trail ids of the record that opened it.
+        owner = self._loop.create_task(own(), context=contextvars.Context())
         try:
             client = await ready
         except BaseException:

@@ -305,6 +305,14 @@ class ContextTrailTest(unittest.TestCase):
             self.ctx.get_device_context("dev-0001")
         self.assertEqual(self.cap.step_records("context"), [])
 
+    def test_session_owner_does_not_keep_the_opening_records_scope(self):
+        from dtm.mesh import trail
+        with trail.message_scope("agent.tasks.risk", 0, 1):
+            trail.establish("risk", "task-1", "ctx-1", "dev-0001")
+            self.ctx.get_device_context("dev-0001")
+        owner = self.ctx._session.owner
+        self.assertEqual(owner.get_context().run(trail.ids), {})
+
     def test_probe_logs_no_context_line(self):
         self.ctx.probe(5.0)
         self.assertEqual(self.cap.step_records("context"), [])

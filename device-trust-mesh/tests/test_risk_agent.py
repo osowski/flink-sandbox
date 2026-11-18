@@ -10,6 +10,8 @@ from dtm.mesh.agents.reasoning import AgentLlm
 from dtm.mesh.agents.risk import RISK_SCHEMA, RiskAgent
 from dtm.mesh.context.server import build_mcp
 from dtm.mesh.llm import OK, LLMResponse
+from dtm.mesh import trail
+from trail_capture import assert_trail, capture
 
 CLOCK = lambda: 1793323940.5  # noqa: E731
 SCORED = {"score": 72, "rationale": "Impossible travel."}
@@ -45,6 +47,22 @@ class RiskAgentTest(unittest.TestCase):
     def states(self):
         return [carrier["artifact"]["name"] if kind == "artifactUpdate" else carrier["status"]["state"]
                 for kind, carrier in self.events()]
+
+    def test_risk_trail(self):
+        cap = capture(self)
+        with trail.message_scope("agent.tasks.risk", 0, 0):
+            self.run_request(self.agent(ScriptedProvider(scored())))
+        lines = assert_trail(self, cap, ["received", "context", "context", "context", "model", "decision"], "risk")
+        self.assertEqual({k: lines[-1].dtm[k] for k in ("artifact", "outcome", "score")},
+                         {"artifact": "risk-assessment", "outcome": "SCORED", "score": 72})
+        (_, interaction), = produced(self.bus, "agent.llm-interactions")
+        self.assertEqual(lines[4].dtm["request_hash"], interaction["request_hash"])
+
+    def test_warning_level_suppresses_trail(self):
+        cap = capture(self, level=trail.parse_level("WARNING"))
+        with trail.message_scope("agent.tasks.risk", 0, 0):
+            self.run_request(self.agent(ScriptedProvider(scored())))
+        self.assertEqual(cap.steps(), [])
 
     def test_happy_path_emits_lifecycle_artifact_and_handoff(self):
         self.run_request(self.agent(ScriptedProvider(scored())))

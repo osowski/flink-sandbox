@@ -7,6 +7,8 @@ from dtm.common.config import FileConfigSource
 from dtm.mesh.agents.kit import REJECTED, SUBMITTED
 from dtm.mesh.agents.revocation import RevocationAgent
 from dtm.mesh.runtime import AgentRuntime
+from dtm.mesh import trail
+from trail_capture import assert_trail, capture
 
 CLOCK = lambda: 1793323940.5  # noqa: E731
 TOPIC = "agent.tasks.revocation"
@@ -22,6 +24,15 @@ class RevocationAgentTest(unittest.TestCase):
 
     def events(self):
         return [next(iter(record["result"].items())) for _, record in produced(self.bus, "agent.task-events")]
+
+    def test_revocation_trail(self):
+        cap = capture(self)
+        with trail.message_scope(TOPIC, 0, 0):
+            self.agent(request_inbound(TOPIC, {"deviceId": "dev-0001", "reason": "Device reported stolen"}),
+                       self.settings)
+        lines = assert_trail(self, cap, ["received", "decision"], "revocation")
+        self.assertEqual((lines[-1].dtm["outcome"], lines[-1].dtm["rule"]), ("REJECTED", "NOT_ROUTED"))
+        self.assertNotIn("artifact", lines[-1].dtm)
 
     def test_rejects_with_scaffold_text(self):
         self.agent(request_inbound(TOPIC, {"deviceId": "dev-0001", "reason": "Device reported stolen"}),

@@ -32,6 +32,10 @@ def choose_method(device: dict, customer: dict | None, signals: list[dict], cite
     return BIOMETRIC
 
 
+# The ``choose_method`` rule that picks each method, for the trail.
+_METHOD_RULES = {MFA_PUSH: "OTHER_TRUSTED_DEVICE", OTP: "WEAK_OS", BIOMETRIC: "DEFAULT"}
+
+
 class StepUpAgent:
     name = "step-up"
     topics = None
@@ -53,6 +57,7 @@ class StepUpAgent:
             return
         outputs = Outputs(self._bus, self.name, settings, request, clock=self._clock)
         task_id = outputs.new_task_id()
+        outputs.begin(task_id)
         outputs.submitted(task_id)
         outputs.status(task_id, WORKING)
         run_task(outputs, task_id, lambda: self._challenge(outputs, task_id, request))
@@ -75,4 +80,5 @@ class StepUpAgent:
                                enrolment_task_id=enrolment_task_id)
         outputs.artifact(task_id, "step-up-challenge", {"method": method, "enrolmentTaskId": enrolment_task_id},
                          f"Challenge {device_id} with {method}")
+        outputs.decision("step-up-challenge", "CHALLENGE", rule=_METHOD_RULES[method], method=method)
         outputs.status(task_id, COMPLETED)

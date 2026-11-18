@@ -81,6 +81,7 @@ class EnrolmentAgent:
         outputs = Outputs(self._bus, self.name, settings, request, clock=self._clock)
         resuming = request.data["taskType"] == "RESOLVE_CHALLENGE" and request.task_id is not None
         task_id = request.task_id if resuming else outputs.new_task_id()
+        outputs.begin(task_id)
         if not resuming:
             outputs.submitted(task_id)
         outputs.status(task_id, WORKING)
@@ -111,6 +112,8 @@ class EnrolmentAgent:
         score = (risk or {}).get("score")
 
         decision = self._pre_llm(device, signals)
+        # A pre-model decision names the one rule that made it; a model decision lists the guardrails that fired.
+        rule = decision.guardrails[0] if decision is not None else None
         if decision is None:
             decision = self._ask_model(outputs, request, settings, device, risk, score, signals)
 
@@ -125,6 +128,8 @@ class EnrolmentAgent:
         if decision.decision != CHALLENGE:
             outputs.policy_command(action, outcome)
         outputs.artifact(task_id, "enrolment-decision", artifact, f"{outcome}: {decision.rationale}")
+        outputs.decision("enrolment-decision", outcome, rule=rule, policy_action=action,
+                         guardrails=",".join(decision.guardrails) if rule is None and decision.guardrails else None)
         if decision.decision == CHALLENGE:
             outputs.send("step-up",
                          {"enrolmentTaskId": task_id, "reason": decision.rationale,
@@ -178,6 +183,7 @@ class EnrolmentAgent:
         outputs.artifact(task_id, "enrolment-decision",
                          {"outcome": "REMOVED", "policyAction": "BLOCK", "rationale": rationale, "guardrails": []},
                          f"REMOVED: {rationale}")
+        outputs.decision("enrolment-decision", "REMOVED", rule="REMOVE_TRUST", policy_action="BLOCK")
         outputs.status(task_id, COMPLETED)
 
     @staticmethod
@@ -191,4 +197,6 @@ class EnrolmentAgent:
         outputs.artifact(task_id, "enrolment-decision",
                          {"outcome": outcome, "policyAction": action, "rationale": rationale, "guardrails": []},
                          f"{outcome}: {rationale}")
+        outputs.decision("enrolment-decision", outcome, rule="RESOLVE_CHALLENGE", policy_action=action,
+                         challenge_result=result)
         outputs.status(task_id, COMPLETED)

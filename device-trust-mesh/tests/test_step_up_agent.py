@@ -6,6 +6,8 @@ from dtm.mesh.agents.context import SyncContext
 from dtm.mesh.agents.kit import COMPLETED, FAILED, SUBMITTED, WORKING
 from dtm.mesh.agents.step_up import StepUpAgent, choose_method
 from dtm.mesh.context.server import build_mcp
+from dtm.mesh import trail
+from trail_capture import assert_trail, capture
 
 CLOCK = lambda: 1793323940.5  # noqa: E731
 TOPIC = "agent.tasks.step-up"
@@ -60,6 +62,15 @@ class StepUpAgentTest(unittest.TestCase):
     def assert_method(self, method):
         (command,) = self.commands()
         self.assertEqual((command["action"], command["challenge_method"]), ("CHALLENGE", method))
+
+    def test_step_up_trail(self):
+        cap = capture(self)
+        with trail.message_scope(TOPIC, 0, 0):
+            self.run_request(devices=[THIS, OTHER_TRUSTED])
+        lines = assert_trail(self, cap, ["received", "context", "context", "context", "decision"], "step-up")
+        self.assertEqual({k: lines[-1].dtm[k] for k in ("artifact", "outcome", "method", "rule")},
+                         {"artifact": "step-up-challenge", "outcome": "CHALLENGE", "method": "MFA_PUSH",
+                          "rule": "OTHER_TRUSTED_DEVICE"})
 
     def test_mfa_push_when_customer_has_other_trusted_device(self):
         self.run_request(devices=[THIS, OTHER_TRUSTED])

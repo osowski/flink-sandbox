@@ -39,3 +39,17 @@ def capture(test: unittest.TestCase, logger: str = trail.LOGGER, level: int = lo
 
     test.addCleanup(restore)
     return handler
+
+
+INFO_STEPS = ("received", "context", "model", "decision", "committed")
+IDS = ("agent", "task_id", "context_id", "device_id")
+
+
+def assert_trail(test: unittest.TestCase, cap: Capture, expected: list[str], agent: str) -> list[logging.LogRecord]:
+    """Assert the INFO trail lines are exactly ``expected``, each carrying ``agent`` and all four ids."""
+    lines = [r for r in cap.records if r.levelno == logging.INFO and getattr(r, "dtm", {}).get("step") in INFO_STEPS]
+    test.assertEqual([r.dtm["step"] for r in lines], expected)
+    for record in lines:
+        test.assertEqual({k for k in IDS if k in record.dtm}, set(IDS), record.dtm)
+        test.assertEqual(record.dtm["agent"], agent)
+    return lines

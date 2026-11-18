@@ -1,4 +1,5 @@
 import json
+import logging
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from dtm.common.bus import Inbound
 from dtm.common.config import FileConfigSource
 from dtm.mesh.agents.compliance import ComplianceAgent
 from dtm.mesh.agents.kit import COMPLETED, Outputs, parse_request
+from dtm.mesh import trail
+from trail_capture import assert_trail, capture
 from dtm.mesh.runtime import AgentRuntime
 from fakes import msg
 
@@ -69,6 +72,27 @@ class ComplianceAgentTest(unittest.TestCase):
         (event,) = [r for r in observed(agent, name, data, offset=offset)
                     if "artifactUpdate" in r.value["result"]]
         return event
+
+    def test_compliance_trail(self):
+        event = self.artifact_event()
+        cap = capture(self)
+        with trail.message_scope("agent.task-events", 0, 0):
+            self.feed([event])
+        lines = assert_trail(self, cap, ["received", "decision"], "compliance")
+        subject = event.value["result"]["artifactUpdate"]
+        self.assertEqual({k: lines[-1].dtm[k] for k in ("artifact", "outcome", "rule", "subject_agent",
+                                                       "subject_task_id", "subject_artifact")},
+                         {"artifact": "audit-record", "outcome": "AUDITED", "rule": "AUDITABLE_ARTIFACT",
+                          "subject_agent": "enrolment", "subject_task_id": subject["taskId"],
+                          "subject_artifact": "enrolment-decision"})
+
+    def test_compliance_unauditable_event_logs_nothing_at_info(self):
+        working = [r for r in observed("enrolment", "enrolment-decision", GRANT)
+                   if "statusUpdate" in r.value["result"]][0]
+        cap = capture(self)
+        with trail.message_scope("agent.task-events", 0, 0):
+            self.feed([working])
+        self.assertEqual(cap.steps(logging.INFO), [])
 
     def test_audits_enrolment_decision(self):
         event = self.artifact_event()

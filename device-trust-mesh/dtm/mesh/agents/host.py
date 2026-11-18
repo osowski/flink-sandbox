@@ -6,6 +6,7 @@ only once context-mcp answers a probe, so no request is failed while context-mcp
 configuration, reports unhealthy when the poll loop thread dies, and stops the host when it is torn down.
 """
 import logging
+import os
 import threading
 from collections.abc import Callable, Sequence
 from typing import Protocol
@@ -17,6 +18,7 @@ from ray import serve
 from dtm.common.bus import AgentBus, Inbound
 from dtm.common.config import CONFIG_ROOT, AgentSettings, FileConfigSource
 from dtm.common.kafka import bootstrap_servers
+from dtm.mesh import trail
 from dtm.mesh.agents.context import SyncContext
 from dtm.mesh.agents.reasoning import AgentLlm
 from dtm.mesh.runtime import AgentRuntime
@@ -139,6 +141,32 @@ class AgentHost:
             raise RuntimeError(f"agent {self._name} poll loop is not running")
 
 
+class ServeLogBridge(logging.Handler):
+    """Hand ``dtm`` records to the ``ray.serve`` logger, whose handlers write the replica log.
+
+    Serve configures only ``ray.serve`` (JSON file and stderr handlers, set by ``logging_config``) and stops
+    it propagating, so app records reach the replica log only through it.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        logging.getLogger("ray.serve").handle(record)
+
+
+def configure_agent_logging(level: str | None = None) -> None:
+    """Route the ``dtm`` loggers into the Serve replica log at ``level``, by default ``DTM_LOG_LEVEL``.
+
+    Raises ``ValueError`` for a level that is not a logging level name. Safe to call again.
+    """
+    level = os.environ.get("DTM_LOG_LEVEL") if level is None else level
+    dtm = logging.getLogger(trail.LOGGER)
+    dtm.setLevel(trail.parse_level(level))
+    dtm.propagate = False
+    if not any(isinstance(h, ServeLogBridge) for h in dtm.handlers):
+        bridge = ServeLogBridge()
+        bridge.addFilter(trail.ScopeFilter())
+        dtm.addHandler(bridge)
+
+
 def build_agent_api(name: str) -> FastAPI:
     api = FastAPI()
 
@@ -166,6 +194,7 @@ def agent_deployment(deployment_name: str, name: str, make_agent) -> serve.Deplo
     @serve.ingress(builder)
     class AgentDeployment:
         def __init__(self):
+            configure_agent_logging()
             self._host = AgentHost.from_environment(make_agent, name)
             self._host.start()
 
